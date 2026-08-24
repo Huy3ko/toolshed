@@ -41,15 +41,15 @@ fi
 # Run-as wrapper: identity = target user when updating a foreign home, else current user
 AS_USER() {
   if [ "$(id -un)" = "$TARGET_USER" ] || [ -z "$TARGET_USER" ]; then
-    env HOME="$TH" "$@"
+    env HOME="$TH" HERMES_HOME="$TH" "$@"
     return $?
   fi
   # Foreign identity: execute under the resolved target account with explicit HOME.
   local CMD="$1"; shift
   if [ "$(id -un)" = "root" ]; then
-      runuser -u "$TARGET_USER" -- env HOME="$TH" "$CMD" "$@"
+      runuser -u "$TARGET_USER" -- env HOME="$TH" HERMES_HOME="$TH" "$CMD" "$@"
     else
-      setpriv --reuid="$TARGET_USER" --regid="$TARGET_USER" --init-groups env HOME="$TH" "$CMD" "$@" 2>/dev/null         || { echo "✗ cannot drop privileges to $TARGET_USER from $(id -un) — rerun as root or as $TARGET_USER" >&2; return 1; }
+      setpriv --reuid="$TARGET_USER" --regid="$TARGET_USER" --init-groups env HOME="$TH" HERMES_HOME="$TH" "$CMD" "$@" 2>/dev/null || { echo "✗ cannot drop privileges to $TARGET_USER from $(id -un) — rerun as root or as $TARGET_USER" >&2; return 1; }
     fi
 }
 
@@ -92,16 +92,30 @@ elif [ -n "$TARGET_USER" ]; then
   USER_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
   [ -z "$USER_HOME" ] || [ "$USER_HOME" = "$TARGET_USER" ] && USER_HOME="$TH"
 fi
-HERMES_BIN="$(AS_USER bash -c 'command -v hermes' 2>/dev/null || true)"
-if [ -z "$HERMES_BIN" ]; then
-  for C in "$TH/hermes-agent/venv/bin/hermes" \
-           "$USER_HOME/.hermes/hermes-agent/venv/bin/hermes" \
-           "$USER_HOME/src/hermes-agent/venv/bin/hermes" \
-           "$TH/src/hermes-agent/venv/bin/hermes"; do
-    [ -x "$C" ] && HERMES_BIN="$C" && break
-  done
+# --home receives the user's HOME (e.g. /home/alice), not the .hermes root.
+# Normalize: strip a trailing /.hermes so callers can pass either form.
+case "$TH" in
+  */.hermes) TH="${TH%/.hermes}" ;;
+esac
+# Deterministic target context: USER_HOME and TARGET_USER derive from --home,
+# never from the invoking process. Root must not leak its own HOME here.
+USER_HOME="$TH"
+if [ -z "$TARGET_USER" ]; then
+  TARGET_USER="$(stat -c '%U' "$USER_HOME")"
+  [ -n "$TARGET_USER" ] || { echo "✗ cannot derive owner of $USER_HOME — pass --user explicitly" >&2; exit 4; }
 fi
-[ -z "$HERMES_BIN" ] && say "✗ hermes not found" && jadd '{"ok":false,"reason":"no hermes"}' && [ "$JSON" = "1" ] && printf "%b" "$RESULT_LOG" && exit 1
+TH="$USER_HOME/.hermes"
+
+# Preflight assertions: fail closed BEFORE any install when the target context
+# does not resolve cleanly (multi-user bug class, found in v0.1.6 canary).
+[ -d "$USER_HOME" ] || { echo "✗ target home does not exist: $USER_HOME" >&2; exit 4; }
+[ "$(stat -c '%U' "$USER_HOME")" = "$TARGET_USER" ] || { echo "✗ owner of $USER_HOME is not $TARGET_USER" >&2; exit 4; }
+HERMES_BIN=""
+for C in "$TH/hermes-agent/venv/bin/hermes" \
+         "$USER_HOME/src/hermes-agent/venv/bin/hermes"; do
+  [ -x "$C" ] && HERMES_BIN="$C" && break
+done
+[ -n "$HERMES_BIN" ] || { echo "✗ no hermes binary under $USER_HOME — refusing to guess from caller PATH" >&2; exit 1; }
 
 [ -z "$PROFILES" ] && PROFILES="default"
 IFS=',' read -r -a TARGETS <<< "$PROFILES"
@@ -148,16 +162,17 @@ for P in "${TARGETS[@]}"; do
 
   # ---------- 2. UPDATE ----------
   REFARG=(); [ -n "$REF" ] && REFARG=(--ref "$REF")
-  UPD_LOG="/tmp/toolshed_update_$P.log"
-AS_USER "$HERMES_BIN" -p "$P" plugins install "$REPO" ${REFARG+"${REFARG[@]}"} --force > "$UPD_LOG" 2>&1
-UPD_OUT=$(cat "$UPD_LOG")
+  UPD_LOG="${TH}/.toolshed_update_${P}.log"
+  UPD_OUT="$(AS_USER "$HERMES_BIN" -p "$P" plugins install "$REPO" ${REFARG+"${REFARG[@]}"} --force 2>&1)"
+  UPD_RC=$?
+  AS_USER rm -f "$UPD_LOG"
   say "  [debug] upd_out FULL: [$UPD_OUT]"
   # Erfolg = exakte Token-Matches; "Installed"/"Location" können nicht als
   # Substring falsch-matchen, weil beide Tokens installer-eigen sind und
   # "Not Installed"/"Already installed" anders lauten. Kein ^-Anker: der
   # Installer rahmt Output in Unicode-Boxen (│ … │), Zeilenanfänger wäre
   # das Box-Zeichen (Helper-Fund, v0.1.5-Review).
-  if ! echo "$UPD_OUT" | grep -qE "✓ Installed|Plugin installed:"; then
+  if [ "$UPD_RC" -ne 0 ] || ! echo "$UPD_OUT" | grep -qE "✓ Installed|Plugin installed:"; then
     say "  ✗ update failed — rolling back whole plugin tree"
     rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
     FAILED+=("$P:update"); jadd "{\"profile\":\"$P\",\"step\":\"update\",\"ok\":false}"; continue
