@@ -144,6 +144,7 @@ for P in "${TARGETS[@]}"; do
   OLD_ENABLED=$(grep -m1 '^  enabled:' "$CFG" | awk '{print $2}')
   OLD_MODE=$(grep -m1 '^  expansion_mode:' "$CFG" | awk '{print $2}')
   OLD_FLOOR=$(grep -A6 'floor_toolsets:' "$CFG" | head -7)
+  OLD_FLOOR_LINE=$(grep -m1 '^  floor_toolsets:' "$CFG" || true)
   GRANT_BEFORE=$("$HERMES_BIN" -p "$P" plugins capabilities $PLUGIN_NAME 2>/dev/null | grep -c "tools.override: granted")
   OLD_COMMIT=$(cd "$PLUGIN_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "?")
 
@@ -223,7 +224,7 @@ for P in "${TARGETS[@]}"; do
     if [ -n "$NEW_FLOOR" ]; then
       # Extract the single-line floor value from the old config and splice it
       # into the new one. Plain sed: both files use the same one-line list format.
-      OLD_FLOOR_LINE="$(grep -m1 '^  floor_toolsets:' "$CFG")"
+      OLD_FLOOR_LINE="${OLD_FLOOR_LINE:-}"
       if [ -n "$OLD_FLOOR_LINE" ]; then
         AS_USER sed -i "s|^  floor_toolsets:.*|$OLD_FLOOR_LINE|" "$NEW_CFG" \
           || { say "  ✗ floor_toolsets merge failed — rolling back whole plugin tree"; rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"; FAILED+=("$P:floor-merge"); jadd "{\"profile\":\"$P\",\"step\":\"floor-merge\",\"ok\":false}"; continue; }
