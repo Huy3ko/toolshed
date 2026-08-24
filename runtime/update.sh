@@ -179,15 +179,15 @@ for P in "${TARGETS[@]}"; do
   fi
 
   # ---------- 3. POST-INSTALL VERIFICATION (not just installer text) ----------
-  # v0.1.5 lesson: the installer's success line alone is not proof.
-  NEW_CFG="$(ls -d "${TH}/profiles/$P/plugins/$PLUGIN_NAME/config.yaml" \
-                 "${TH}/plugins/$PLUGIN_NAME/config.yaml" 2>/dev/null | head -1)"
-  if [ -z "$NEW_CFG" ] || [ ! -f "$NEW_CFG" ]; then
+  # Runtime v2 intentionally ships NO user config. Find the installed tree
+  # first, then restore the user's config into it.
+  NEW_PLUGIN_DIR="$(ls -d "${TH}/profiles/$P/plugins/$PLUGIN_NAME" \
+                         "${TH}/plugins/$PLUGIN_NAME" 2>/dev/null | head -1)"
+  if [ -z "$NEW_PLUGIN_DIR" ] || [ ! -d "$NEW_PLUGIN_DIR" ]; then
     say "  ✗ post-install: new plugin dir not found — rolling back whole plugin tree"
     rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
     FAILED+=("$P:postinstall-missing"); jadd "{\"profile\":\"$P\",\"step\":\"postinstall\",\"ok\":false}"; continue
   fi
-  NEW_PLUGIN_DIR="$(dirname "$NEW_CFG")"
   LAYOUT_MARKER="$NEW_PLUGIN_DIR/layout_version"
   if ! grep -q "^layout_version: 2$" "$LAYOUT_MARKER" 2>/dev/null; then
     say "  ✗ post-install: layout_version=2 marker missing — rolling back whole plugin tree"
@@ -197,8 +197,15 @@ for P in "${TARGETS[@]}"; do
 
   # ---------- 4. RESTORE USER CONFIG ----------
   # merge: keep new defaults, but restore user's enabled/mode/floor
-  sed -i "s|^  enabled:.*|  enabled: $OLD_ENABLED|" "$NEW_CFG"
-  if [ -n "$OLD_MODE" ]; then sed -i "s|^  mode:.*|  mode: $OLD_MODE|" "$NEW_CFG"; fi
+  NEW_CFG="$NEW_PLUGIN_DIR/config.yaml"
+  AS_USER cp "$BACKUP" "$NEW_CFG"
+  if [ ! -f "$NEW_CFG" ]; then
+    say "  ✗ config restore failed — rolling back whole plugin tree"
+    rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
+    FAILED+=("$P:restore"); jadd "{\"profile\":\"$P\",\"step\":\"restore\",\"ok\":false}"; continue
+  fi
+  # Existing user config already carries the desired values; this also keeps
+  # the code explicit about which state is restored during v1 -> v2.
 
   # ---------- 5. VERIFY ----------
   GRANT_CFG="${TH}/config.yaml"
