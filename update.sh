@@ -23,7 +23,7 @@ while [ $# -gt 0 ]; do
     --json) JSON=1; shift ;;
     # D2/Multi-User contract: update a FOREIGN agent's home. The updater derives
     # the target user from the home owner and runs every write step as that user
-    # (sudo -u) — root never owns plugin files (v0.1.4 ownership fix).
+    # runs every write step under the target identity — root never owns plugin files.
     --home) TARGET_HOME="$2"; shift 2 ;;
     --user) TARGET_USER="$2"; shift 2 ;;
     *) shift ;;
@@ -44,9 +44,13 @@ AS_USER() {
     env HOME="$TH" "$@"
     return
   fi
-  # foreign user: run via sudo with explicit env; $1 must be an executable path
+  # Foreign identity: execute under the resolved target account with explicit HOME.
   local CMD="$1"; shift
-  sudo -u "$TARGET_USER" env HOME="$TH" "$CMD" "$@"
+  if [ "$(id -un)" = "root" ]; then
+      runuser -u "$TARGET_USER" -- env HOME="$TH" "$CMD" "$@"
+    else
+      setpriv --reuid="$TARGET_USER" --regid="$TARGET_USER" --init-groups env HOME="$TH" "$CMD" "$@" 2>/dev/null         || { echo "✗ cannot drop privileges to $TARGET_USER from $(id -un) — rerun as root or as $TARGET_USER" >&2; return 1; }
+    fi
 }
 
 say() { [ "$JSON" = "0" ] && echo "$@"; return 0; }
@@ -56,8 +60,8 @@ jadd() { RESULT_LOG="$RESULT_LOG$1\n"; }
 #   git-install:    <home>/.hermes/hermes-agent/venv/bin/hermes
 #   source-install: <home>/src/hermes-agent/venv/bin/hermes
 # Default-Auflösung (ohne --home): Bei --user wird das Home des ZIELUSERS aus
-# /etc/passwd geholt — nie $HOME des Aufrufers (Fix für Multi-User-Bug aus
-# Helper-Review 2026-08-23). Ohne --user gilt der eigene Kontext.
+# Resolve the target user's real home via the system user database (getent)
+# — never trust $HOME of the caller (multi-user fix, helper review 2026-08-23).
 # USER_HOME = echtes Home des Zielusers; die Suchkette nutzt NUR noch dieses
 # (Canary-Fund v0.1.5: $HOME-des-Aufrufers trifft im root-Lauf nie den
 # Zieluser-Layout, alle 4 Einträge missen).
