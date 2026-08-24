@@ -40,9 +40,15 @@ Toolshed sits outside the agent core and reduces that surface before the request
 **About profiles:** Hermes calls each agent configuration a *profile*. If you run one agent,
 that's `default`. With several agents, repeat these steps for every profile.
 
+> **Important: install Toolshed from the `/runtime` subdirectory.** Installing the repository
+> root (`Huy3ko/toolshed`) makes Hermes scan the full development repository — ADRs, CI files,
+> contributor docs — which the security scanner will likely block as DANGEROUS. The `/runtime`
+> path contains only the actual runtime payload.
+
 ```bash
-# 1. Install from GitHub
-hermes -p default plugins install Huy3ko/toolshed
+# 1. Install from GitHub (pinned to the v0.1.6 commit)
+hermes -p default plugins install Huy3ko/toolshed/runtime \
+  --ref d33c8bc8ea12d978b21518d41b49ce3b575c266a
 
 # 2. Authorize the tool-surface override
 hermes -p default plugins enable hermes-token-router --allow-tool-override
@@ -80,7 +86,8 @@ That's the whole mechanism. Details are in the diagram above and in the ADRs.
 One profile = one agent = isolated state:
 
 ```bash
-hermes -p coding plugins install Huy3ko/toolshed
+hermes -p coding plugins install Huy3ko/toolshed/runtime \
+  --ref d33c8bc8ea12d978b21518d41b49ce3b575c266a
 hermes -p coding plugins enable hermes-token-router --allow-tool-override
 ```
 
@@ -105,7 +112,7 @@ are planned.
 release". For reproducible deployments, pin the commit behind a release:
 
 ```bash
-hermes -p default plugins install https://github.com/Huy3ko/toolshed.git \
+hermes -p default plugins install Huy3ko/toolshed/runtime \
   --ref <release-commit-sha> --force
 ```
 
