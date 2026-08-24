@@ -4,6 +4,55 @@ All notable changes to Toolshed are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [SemVer](https://semver.org/) (0.x = pre-stable).
 
+## [0.1.6] — 2026-08-24
+
+### Fixed
+- **Community install no longer blocked by Hermes' security scanner.**
+  A fresh `hermes plugins install Huy3ko/toolshed` was classified DANGEROUS
+  (external report, Termux): the scanner scans the whole cloned repo, and
+  development artifacts (ADRs mentioning `~/.hermes/.env`, CI `pip install`,
+  CONTRIBUTING) plus German comments in `update.sh` referencing `/etc/passwd`
+  and `sudo -u` tripped critical/high patterns. Root cause: repo root was used
+  as the install surface.
+
+### Changed
+- **Distribution v2: runtime payload moved to `runtime/`.** The public install
+  command is now:
+
+      hermes plugins install Huy3ko/toolshed/runtime
+
+  Hermes natively supports subdirectory installs and scans only that
+  directory. The runtime payload contains plugin.yaml, router code,
+  learning/telemetry stores, update.sh, doctor.sh and a `layout_version: 2`
+  marker — nothing else. The development tree at repo root is unchanged.
+- **Updater hardening** (`runtime/update.sh`), all findings from an adversarial
+  helper review, reproduced before fixing:
+  - deterministic target context: `--home` → USER_HOME/TARGET_USER/HERMES_BIN
+    resolved from ownership, never from caller `$HOME`; fail-closed preflight;
+  - `HERMES_HOME` exported explicitly on every privileged call (fixes wrong-
+    profile installs when invoked as root);
+  - atomic v1→v2 migration: full-tree backup before anything is replaced,
+    verified rollback (tree restored, v2 marker absent, ownership intact) with
+    rollback failure as its own hard-fail state — no half-states;
+  - config merge instead of overwrite: only documented user keys (`enabled`,
+    `expansion_mode`, `floor_toolsets`) are carried into the fresh v2 config;
+    captured *before* the old tree is replaced;
+  - strict profile allowlist `[A-Za-z0-9_-]+` (no path traversal via
+    `--profile`);
+  - collision-safe backup names (epoch+PID); backups cleaned up under the
+    target user's identity;
+  - installer success requires exit code AND canonical success tokens, then a
+    post-install `layout_version: 2` marker check.
+- `update.sh`: updater comments translated to English; privilege drop uses
+  `runuser`(root)/`setpriv`(fallback).
+
+### Validation (helper canary, UID 1003, scanner ENABLED)
+- Fresh install of `Huy3ko/toolshed/runtime` → scan clean → grant → enable →
+  doctor OK → routing smoke OK.
+- Migration v0.1.5 full-repo layout → v0.1.6 runtime layout: config, grants,
+  enabled/mode preserved; ownership `hermes_helper:hermes_helper`; doctor OK.
+- Repeat update v2→v2 green; rollback path exercised and verified.
+
 ## [0.1.5] — 2026-08-24
 
 ### Fixed
