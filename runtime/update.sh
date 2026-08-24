@@ -142,7 +142,7 @@ for P in "${TARGETS[@]}"; do
   [ -s "$TREE_BACKUP" ] || { FAILED+=("$P:tree-backup"); jadd "{\"profile\":\"$P\",\"step\":\"tree-backup\",\"ok\":false}"; continue; }
 
   OLD_ENABLED=$(grep -m1 '^  enabled:' "$CFG" | awk '{print $2}')
-  OLD_MODE=$(grep -m1 '^  mode:' "$CFG" | awk '{print $2}')
+  OLD_MODE=$(grep -m1 '^  expansion_mode:' "$CFG" | awk '{print $2}')
   OLD_FLOOR=$(grep -A6 'floor_toolsets:' "$CFG" | head -7)
   GRANT_BEFORE=$("$HERMES_BIN" -p "$P" plugins capabilities $PLUGIN_NAME 2>/dev/null | grep -c "tools.override: granted")
   OLD_COMMIT=$(cd "$PLUGIN_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "?")
@@ -221,21 +221,13 @@ for P in "${TARGETS[@]}"; do
   if [ -n "$OLD_FLOOR" ]; then
     NEW_FLOOR="$(grep -A6 'floor_toolsets:' "$NEW_CFG" | head -7)"
     if [ -n "$NEW_FLOOR" ]; then
-      AS_USER python3 - "$CFG" "$NEW_CFG" <<'PYEOF'
-import re, sys
-old_p, new_p = sys.argv[1], sys.argv[2]
-def grab(path):
-    txt = open(path).read()
-    m = re.search(r'^(  floor_toolsets:\s*\[[^\]]*\])\s*$', txt, re.M)
-    return m.group(1) if m else None
-old_val = grab(old_p)
-new_txt = open(new_p).read()
-if old_val:
-    m = re.search(r'^(  floor_toolsets:\s*\[[^\]]*\])\s*$', new_txt, re.M)
-    if m:
-        open(new_p, "w").write(new_txt[:m.start()] + old_val + new_txt[m.end():])
-PYEOF
-      [ $? -eq 0 ] || { say "  ✗ floor_toolsets merge failed — rolling back whole plugin tree"; rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"; FAILED+=("$P:floor-merge"); jadd "{\"profile\":\"$P\",\"step\":\"floor-merge\",\"ok\":false}"; continue; }
+      # Extract the single-line floor value from the old config and splice it
+      # into the new one. Plain sed: both files use the same one-line list format.
+      OLD_FLOOR_LINE="$(grep -m1 '^  floor_toolsets:' "$CFG")"
+      if [ -n "$OLD_FLOOR_LINE" ]; then
+        AS_USER sed -i "s|^  floor_toolsets:.*|$OLD_FLOOR_LINE|" "$NEW_CFG" \
+          || { say "  ✗ floor_toolsets merge failed — rolling back whole plugin tree"; rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"; FAILED+=("$P:floor-merge"); jadd "{\"profile\":\"$P\",\"step\":\"floor-merge\",\"ok\":false}"; continue; }
+      fi
     fi
   fi
 
