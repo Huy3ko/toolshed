@@ -129,14 +129,14 @@ for P in "${TARGETS[@]}"; do
   fi
 
   # ---------- 1. CAPTURE STATE ----------
-  BACKUP="$CFG.preupdate.$(date +%s)"
+  PLUGIN_DIR="$(dirname "$CFG")"
+  BACKUP="${PLUGIN_DIR}.config.preupdate.$(date +%s)"
   AS_USER cp "$CFG" "$BACKUP"
 
   # Full-tree backup for atomic migration (v1 -> v2 or any failed update).
   # The whole plugin dir is archived BEFORE anything is replaced; it is
   # deleted only after every verification passes, and restored wholesale
   # on any failure. No half-states (ADR-0010/ADR-0011 contract).
-  PLUGIN_DIR="$(dirname "$CFG")"
   TREE_BACKUP="${PLUGIN_DIR}.preupdate.$(date +%s).tgz"
   AS_USER tar -czf "$TREE_BACKUP" -C "$(dirname "$PLUGIN_DIR")" "$(basename "$PLUGIN_DIR")"
   [ -s "$TREE_BACKUP" ] || { FAILED+=("$P:tree-backup"); jadd "{\"profile\":\"$P\",\"step\":\"tree-backup\",\"ok\":false}"; continue; }
