@@ -53,8 +53,18 @@ AS_USER() {
     fi
 }
 
-say() { [ "$JSON" = "0" ] && echo "$@"; return 0; }
+say() { [ "$JSON" = "0" ] && printf '%s\n' "$*" || true; }
 jadd() { RESULT_LOG="$RESULT_LOG$1\n"; }
+
+# Profile names are used in filesystem paths — strict allowlist, no traversal.
+validate_profile() {
+  case "$1" in
+    ''|*[!A-Za-z0-9_-]*)
+      echo "✗ invalid profile name: '$1' (allowed: [A-Za-z0-9_-]+)" >&2
+      return 1 ;;
+  esac
+  return 0
+}
 
 # Atomic rollback: restore the ENTIRE pre-update plugin tree from the archive.
 # Used on any failure after the tree backup exists; config-only restore is not
@@ -63,6 +73,27 @@ rollback_tree() {
   local PDIR="$1" TB="$2"
   AS_USER rm -rf "$PDIR" || { echo "✗ ROLLBACK FAILED: could not remove $PDIR — manual recovery from $TB required" >&2; return 1; }
   AS_USER tar -xzf "$TB" -C "$(dirname "$PDIR")" || { echo "✗ ROLLBACK FAILED: could not extract $TB — manual recovery required" >&2; return 1; }
+  return 0
+}
+
+
+# Verified rollback: restore the tree, then PROVE the restore worked
+# (dir exists, no v2 marker, ownership intact). A failed rollback is its own
+# hard failure state — never silently continue (helper review 2026-08-24).
+verified_rollback() {
+  local PDIR="$1" TB="$2" STEP="$3"
+  if ! rollback_tree "$PDIR" "$TB"; then
+    say "  ✗✗ ROLLBACK FAILED after step '$STEP' — MANUAL RECOVERY REQUIRED from $TB"
+    FAILED+=("$STEP:rollback-failed")
+    return 1
+  fi
+  # Postconditions: old tree back, v2 marker gone, ownership correct
+  if [ ! -d "$PDIR" ] || grep -q "^layout_version: 2$" "$PDIR/layout_version" 2>/dev/null \
+     || [ "$(stat -c '%U' "$PDIR")" != "$TARGET_USER" ]; then
+    say "  ✗✗ ROLLBACK INCOMPLETE after step '$STEP' — MANUAL RECOVERY REQUIRED from $TB"
+    FAILED+=("$STEP:rollback-incomplete")
+    return 1
+  fi
   return 0
 }
 
@@ -119,8 +150,12 @@ done
 
 [ -z "$PROFILES" ] && PROFILES="default"
 IFS=',' read -r -a TARGETS <<< "$PROFILES"
+for P in "${TARGETS[@]}"; do
+  validate_profile "$P" || { echo "✗ aborting — invalid profile in list" >&2; exit 4; }
+done
 
 FAILED=()
+STAMP="$(date +%s)-$$"
 for P in "${TARGETS[@]}"; do
   CFG="$(ls -d "${TH}/profiles/$P/plugins/$PLUGIN_NAME/config.yaml" \
              "${TH}/plugins/$PLUGIN_NAME/config.yaml" 2>/dev/null | head -1)"
@@ -130,14 +165,14 @@ for P in "${TARGETS[@]}"; do
 
   # ---------- 1. CAPTURE STATE ----------
   PLUGIN_DIR="$(dirname "$CFG")"
-  BACKUP="${PLUGIN_DIR}.config.preupdate.$(date +%s)"
+  BACKUP="${PLUGIN_DIR}.config.preupdate.$STAMP"
   AS_USER cp "$CFG" "$BACKUP"
 
   # Full-tree backup for atomic migration (v1 -> v2 or any failed update).
   # The whole plugin dir is archived BEFORE anything is replaced; it is
   # deleted only after every verification passes, and restored wholesale
   # on any failure. No half-states (ADR-0010/ADR-0011 contract).
-  TREE_BACKUP="${PLUGIN_DIR}.preupdate.$(date +%s).tgz"
+  TREE_BACKUP="${PLUGIN_DIR}.preupdate.$STAMP.tgz"
   AS_USER tar -czf "$TREE_BACKUP" -C "$(dirname "$PLUGIN_DIR")" "$(basename "$PLUGIN_DIR")"
   [ -s "$TREE_BACKUP" ] || { FAILED+=("$P:tree-backup"); jadd "{\"profile\":\"$P\",\"step\":\"tree-backup\",\"ok\":false}"; continue; }
 
@@ -175,7 +210,7 @@ for P in "${TARGETS[@]}"; do
   # das Box-Zeichen (Helper-Fund, v0.1.5-Review).
   if [ "$UPD_RC" -ne 0 ] || ! echo "$UPD_OUT" | grep -qE "✓ Installed|Plugin installed:"; then
     say "  ✗ update failed — rolling back whole plugin tree"
-    rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
+    if ! verified_rollback "$PLUGIN_DIR" "$TREE_BACKUP" "update"; then continue; fi
     FAILED+=("$P:update"); jadd "{\"profile\":\"$P\",\"step\":\"update\",\"ok\":false}"; continue
   fi
 
@@ -186,13 +221,13 @@ for P in "${TARGETS[@]}"; do
                          "${TH}/plugins/$PLUGIN_NAME" 2>/dev/null | head -1)"
   if [ -z "$NEW_PLUGIN_DIR" ] || [ ! -d "$NEW_PLUGIN_DIR" ]; then
     say "  ✗ post-install: new plugin dir not found — rolling back whole plugin tree"
-    rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
+    if ! verified_rollback "$PLUGIN_DIR" "$TREE_BACKUP" "postinstall-missing"; then continue; fi
     FAILED+=("$P:postinstall-missing"); jadd "{\"profile\":\"$P\",\"step\":\"postinstall\",\"ok\":false}"; continue
   fi
   LAYOUT_MARKER="$NEW_PLUGIN_DIR/layout_version"
   if ! grep -q "^layout_version: 2$" "$LAYOUT_MARKER" 2>/dev/null; then
     say "  ✗ post-install: layout_version=2 marker missing — rolling back whole plugin tree"
-    rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
+    if ! verified_rollback "$PLUGIN_DIR" "$TREE_BACKUP" "verify-layout"; then continue; fi
     FAILED+=("$P:layout-not-v2"); jadd "{\"profile\":\"$P\",\"step\":\"verify-layout\",\"ok\":false}"; continue
   fi
 
@@ -209,7 +244,7 @@ for P in "${TARGETS[@]}"; do
   fi
   if [ ! -f "$NEW_CFG" ]; then
     say "  ✗ new config missing — rolling back whole plugin tree"
-    rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
+    if ! verified_rollback "$PLUGIN_DIR" "$TREE_BACKUP" "restore"; then continue; fi
     FAILED+=("$P:restore"); jadd "{\"profile\":\"$P\",\"step\":\"restore\",\"ok\":false}"; continue
   fi
   AS_USER sed -i \
@@ -227,7 +262,7 @@ for P in "${TARGETS[@]}"; do
       OLD_FLOOR_LINE="${OLD_FLOOR_LINE:-}"
       if [ -n "$OLD_FLOOR_LINE" ]; then
         AS_USER sed -i "s|^  floor_toolsets:.*|$OLD_FLOOR_LINE|" "$NEW_CFG" \
-          || { say "  ✗ floor_toolsets merge failed — rolling back whole plugin tree"; rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"; FAILED+=("$P:floor-merge"); jadd "{\"profile\":\"$P\",\"step\":\"floor-merge\",\"ok\":false}"; continue; }
+          || { say "  ✗ floor_toolsets merge failed — rolling back whole plugin tree"; if ! verified_rollback "$PLUGIN_DIR" "$TREE_BACKUP" "floor-merge"; then continue; fi; FAILED+=("$P:floor-merge"); jadd "{\"profile\":\"$P\",\"step\":\"floor-merge\",\"ok\":false}"; continue; }
       fi
     fi
   fi
@@ -241,12 +276,12 @@ GRANT_AFTER=0
 
   if [ "$EN_AFTER" != "$OLD_ENABLED" ]; then
     say "  ✗ enabled-state lost ($OLD_ENABLED → $EN_AFTER) — rolling back whole plugin tree"
-    rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
+    if ! verified_rollback "$PLUGIN_DIR" "$TREE_BACKUP" "enabled-lost"; then continue; fi
     FAILED+=("$P:enabled-lost"); jadd "{\"profile\":\"$P\",\"step\":\"verify-enabled\",\"ok\":false}"; continue
   fi
   if [ "$GRANT_BEFORE" = "1" ] && [ "$GRANT_AFTER" = "0" ]; then
     say "  ✗ grant lost during update — rolling back whole plugin tree"
-    rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
+    if ! verified_rollback "$PLUGIN_DIR" "$TREE_BACKUP" "grant-lost"; then continue; fi
     FAILED+=("$P:grant-lost"); jadd "{\"profile\":\"$P\",\"step\":\"verify-grant\",\"ok\":false}"; continue
   fi
 
@@ -255,7 +290,8 @@ GRANT_AFTER=0
 
   # ---------- 7. SUCCESS: only now drop the archived pre-update tree ----------
   # Migration/update fully verified — the tree backup has served its purpose.
-  rm -f "$TREE_BACKUP"
+  AS_USER rm -f "$TREE_BACKUP"
+  AS_USER rm -f "$BACKUP"
 done
 
 FAILCOUNT=${#FAILED[@]}
