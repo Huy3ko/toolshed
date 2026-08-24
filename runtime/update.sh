@@ -56,6 +56,15 @@ AS_USER() {
 say() { [ "$JSON" = "0" ] && echo "$@"; return 0; }
 jadd() { RESULT_LOG="$RESULT_LOG$1\n"; }
 
+# Atomic rollback: restore the ENTIRE pre-update plugin tree from the archive.
+# Used on any failure after the tree backup exists; config-only restore is not
+# enough for a layout migration (ADR-0011: no half-states).
+rollback_tree() {
+  local PDIR="$1" TB="$2"
+  AS_USER rm -rf "$PDIR"
+  AS_USER tar -xzf "$TB" -C "$(dirname "$PDIR")"
+}
+
 # TH: Hermes-Config-Root. Suchkette unten deckt beide Layouts ab:
 #   git-install:    <home>/.hermes/hermes-agent/venv/bin/hermes
 #   source-install: <home>/src/hermes-agent/venv/bin/hermes
@@ -108,11 +117,29 @@ for P in "${TARGETS[@]}"; do
   BACKUP="$CFG.preupdate.$(date +%s)"
   cp "$CFG" "$BACKUP"
 
+  # Full-tree backup for atomic migration (v1 -> v2 or any failed update).
+  # The whole plugin dir is archived BEFORE anything is replaced; it is
+  # deleted only after every verification passes, and restored wholesale
+  # on any failure. No half-states (ADR-0010/ADR-0011 contract).
+  PLUGIN_DIR="$(dirname "$CFG")"
+  TREE_BACKUP="${PLUGIN_DIR}.preupdate.$(date +%s).tgz"
+  AS_USER tar -czf "$TREE_BACKUP" -C "$(dirname "$PLUGIN_DIR")" "$(basename "$PLUGIN_DIR")"
+  [ -s "$TREE_BACKUP" ] || { FAILED+=("$P:tree-backup"); jadd "{\"profile\":\"$P\",\"step\":\"tree-backup\",\"ok\":false}"; continue; }
+
   OLD_ENABLED=$(grep -m1 '^  enabled:' "$CFG" | awk '{print $2}')
   OLD_MODE=$(grep -m1 '^  mode:' "$CFG" | awk '{print $2}')
   OLD_FLOOR=$(grep -A6 'floor_toolsets:' "$CFG" | head -7)
   GRANT_BEFORE=$("$HERMES_BIN" -p "$P" plugins capabilities $PLUGIN_NAME 2>/dev/null | grep -c "tools.override: granted")
-  OLD_COMMIT=$(cd "$(dirname "$CFG")" && git rev-parse --short HEAD 2>/dev/null || echo "?")
+  OLD_COMMIT=$(cd "$PLUGIN_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "?")
+
+  # Layout detection via explicit marker, not path guessing.
+  if grep -q "^layout_version: 2$" "$PLUGIN_DIR/layout_version" 2>/dev/null; then
+    LAYOUT="v2"
+  elif [ -d "$PLUGIN_DIR/adr" ] || [ -d "$PLUGIN_DIR/.github" ]; then
+    LAYOUT="v1"
+  else
+    LAYOUT="unknown"
+  fi
 
   say "── Profile: $P ────────────────────────────────────────────"
   say "  before: commit=$OLD_COMMIT enabled=$OLD_ENABLED mode=${OLD_MODE:-active} grant=$GRANT_BEFORE"
@@ -130,8 +157,8 @@ UPD_OUT=$(cat "$UPD_LOG")
   # Installer rahmt Output in Unicode-Boxen (│ … │), Zeilenanfänger wäre
   # das Box-Zeichen (Helper-Fund, v0.1.5-Review).
   if ! echo "$UPD_OUT" | grep -qE "✓ Installed|Plugin installed:"; then
-    say "  ✗ update failed — restoring config from backup"
-    cp "$BACKUP" "$CFG"
+    say "  ✗ update failed — rolling back whole plugin tree"
+    rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
     FAILED+=("$P:update"); jadd "{\"profile\":\"$P\",\"step\":\"update\",\"ok\":false}"; continue
   fi
 
@@ -140,15 +167,15 @@ UPD_OUT=$(cat "$UPD_LOG")
   NEW_CFG="$(ls -d "${TH}/profiles/$P/plugins/$PLUGIN_NAME/config.yaml" \
                  "${TH}/plugins/$PLUGIN_NAME/config.yaml" 2>/dev/null | head -1)"
   if [ -z "$NEW_CFG" ] || [ ! -f "$NEW_CFG" ]; then
-    say "  ✗ post-install: new plugin dir not found — restoring backup"
-    cp "$BACKUP" "$CFG"
+    say "  ✗ post-install: new plugin dir not found — rolling back whole plugin tree"
+    rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
     FAILED+=("$P:postinstall-missing"); jadd "{\"profile\":\"$P\",\"step\":\"postinstall\",\"ok\":false}"; continue
   fi
   NEW_PLUGIN_DIR="$(dirname "$NEW_CFG")"
   LAYOUT_MARKER="$NEW_PLUGIN_DIR/layout_version"
   if ! grep -q "^layout_version: 2$" "$LAYOUT_MARKER" 2>/dev/null; then
-    say "  ✗ post-install: layout_version=2 marker missing — expected runtime/v2 payload, got something else. Restoring backup."
-    cp "$BACKUP" "$CFG"
+    say "  ✗ post-install: layout_version=2 marker missing — rolling back whole plugin tree"
+    rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
     FAILED+=("$P:layout-not-v2"); jadd "{\"profile\":\"$P\",\"step\":\"verify-layout\",\"ok\":false}"; continue
   fi
 
@@ -165,18 +192,22 @@ GRANT_AFTER=0
   NEW_COMMIT=$(cd "$(dirname "$NEW_CFG")" && git rev-parse --short HEAD 2>/dev/null || echo "?")
 
   if [ "$EN_AFTER" != "$OLD_ENABLED" ]; then
-    say "  ✗ enabled-state lost ($OLD_ENABLED → $EN_AFTER) — restoring backup"
-    cp "$BACKUP" "$NEW_CFG"
+    say "  ✗ enabled-state lost ($OLD_ENABLED → $EN_AFTER) — rolling back whole plugin tree"
+    rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
     FAILED+=("$P:enabled-lost"); jadd "{\"profile\":\"$P\",\"step\":\"verify-enabled\",\"ok\":false}"; continue
   fi
   if [ "$GRANT_BEFORE" = "1" ] && [ "$GRANT_AFTER" = "0" ]; then
-    say "  ✗ grant lost during update — restoring backup"
-    cp "$BACKUP" "$NEW_CFG"
+    say "  ✗ grant lost during update — rolling back whole plugin tree"
+    rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
     FAILED+=("$P:grant-lost"); jadd "{\"profile\":\"$P\",\"step\":\"verify-grant\",\"ok\":false}"; continue
   fi
 
-  say "  after: commit=$NEW_COMMIT enabled=$EN_AFTER grant=$GRANT_AFTER"
-  jadd "{\"profile\":\"$P\",\"after\":{\"commit\":\"$NEW_COMMIT\",\"enabled\":\"$EN_AFTER\",\"grant\":$GRANT_AFTER},\"ok\":true}"
+  say "  after: commit=$NEW_COMMIT enabled=$EN_AFTER grant=$GRANT_AFTER layout=v2 (was $LAYOUT)"
+  jadd "{\"profile\":\"$P\",\"after\":{\"commit\":\"$NEW_COMMIT\",\"enabled\":\"$EN_AFTER\",\"grant\":$GRANT_AFTER,\"layout_was\":\"$LAYOUT\"},\"ok\":true}"
+
+  # ---------- 7. SUCCESS: only now drop the archived pre-update tree ----------
+  # Migration/update fully verified — the tree backup has served its purpose.
+  rm -f "$TREE_BACKUP"
 done
 
 FAILCOUNT=${#FAILED[@]}
