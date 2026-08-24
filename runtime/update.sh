@@ -201,6 +201,12 @@ for P in "${TARGETS[@]}"; do
   # (helper review: wholesale overwrite could resurrect permissive v1 values).
   NEW_CFG="$NEW_PLUGIN_DIR/config.yaml"
   if [ ! -f "$NEW_CFG" ]; then
+    # v2 payload ships config.template.yaml; materialize the user config from it
+    if [ -f "$NEW_PLUGIN_DIR/config.template.yaml" ]; then
+      AS_USER cp "$NEW_PLUGIN_DIR/config.template.yaml" "$NEW_CFG"
+    fi
+  fi
+  if [ ! -f "$NEW_CFG" ]; then
     say "  ✗ new config missing — rolling back whole plugin tree"
     rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
     FAILED+=("$P:restore"); jadd "{\"profile\":\"$P\",\"step\":\"restore\",\"ok\":false}"; continue
