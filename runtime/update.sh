@@ -42,7 +42,7 @@ fi
 AS_USER() {
   if [ "$(id -un)" = "$TARGET_USER" ] || [ -z "$TARGET_USER" ]; then
     env HOME="$TH" "$@"
-    return
+    return $?
   fi
   # Foreign identity: execute under the resolved target account with explicit HOME.
   local CMD="$1"; shift
@@ -61,8 +61,9 @@ jadd() { RESULT_LOG="$RESULT_LOG$1\n"; }
 # enough for a layout migration (ADR-0011: no half-states).
 rollback_tree() {
   local PDIR="$1" TB="$2"
-  AS_USER rm -rf "$PDIR"
-  AS_USER tar -xzf "$TB" -C "$(dirname "$PDIR")"
+  AS_USER rm -rf "$PDIR" || { echo "✗ ROLLBACK FAILED: could not remove $PDIR — manual recovery from $TB required" >&2; return 1; }
+  AS_USER tar -xzf "$TB" -C "$(dirname "$PDIR")" || { echo "✗ ROLLBACK FAILED: could not extract $TB — manual recovery required" >&2; return 1; }
+  return 0
 }
 
 # TH: Hermes-Config-Root. Suchkette unten deckt beide Layouts ab:
@@ -115,7 +116,7 @@ for P in "${TARGETS[@]}"; do
 
   # ---------- 1. CAPTURE STATE ----------
   BACKUP="$CFG.preupdate.$(date +%s)"
-  cp "$CFG" "$BACKUP"
+  AS_USER cp "$CFG" "$BACKUP"
 
   # Full-tree backup for atomic migration (v1 -> v2 or any failed update).
   # The whole plugin dir is archived BEFORE anything is replaced; it is
