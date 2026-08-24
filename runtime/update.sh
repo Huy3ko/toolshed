@@ -195,17 +195,43 @@ for P in "${TARGETS[@]}"; do
     FAILED+=("$P:layout-not-v2"); jadd "{\"profile\":\"$P\",\"step\":\"verify-layout\",\"ok\":false}"; continue
   fi
 
-  # ---------- 4. RESTORE USER CONFIG ----------
-  # merge: keep new defaults, but restore user's enabled/mode/floor
+  # ---------- 4. RESTORE USER CONFIG (merge, not overwrite) ----------
+  # v2 config ships fresh defaults; only documented user-tunable keys are
+  # carried over from the pre-update config. Unknown v1 keys are NOT copied
+  # (helper review: wholesale overwrite could resurrect permissive v1 values).
   NEW_CFG="$NEW_PLUGIN_DIR/config.yaml"
-  AS_USER cp "$BACKUP" "$NEW_CFG"
   if [ ! -f "$NEW_CFG" ]; then
-    say "  ✗ config restore failed — rolling back whole plugin tree"
+    say "  ✗ new config missing — rolling back whole plugin tree"
     rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"
     FAILED+=("$P:restore"); jadd "{\"profile\":\"$P\",\"step\":\"restore\",\"ok\":false}"; continue
   fi
-  # Existing user config already carries the desired values; this also keeps
-  # the code explicit about which state is restored during v1 -> v2.
+  AS_USER sed -i \
+    -e "s|^\\(  enabled:\\).*|\\1 $OLD_ENABLED|" \
+    "$NEW_CFG"
+  if [ -n "$OLD_MODE" ]; then
+    AS_USER sed -i "s|^\\(  expansion_mode:\\).*|\\1 $OLD_MODE|" "$NEW_CFG"
+  fi
+  # floor_toolsets: preserve the user's list verbatim when present in both.
+  if [ -n "$OLD_FLOOR" ]; then
+    NEW_FLOOR="$(grep -A6 'floor_toolsets:' "$NEW_CFG" | head -7)"
+    if [ -n "$NEW_FLOOR" ]; then
+      AS_USER python3 - "$CFG" "$NEW_CFG" <<'PYEOF'
+import re, sys
+old_p, new_p = sys.argv[1], sys.argv[2]
+def grab(path):
+    txt = open(path).read()
+    m = re.search(r'^(  floor_toolsets:\s*\[[^\]]*\])\s*$', txt, re.M)
+    return m.group(1) if m else None
+old_val = grab(old_p)
+new_txt = open(new_p).read()
+if old_val:
+    m = re.search(r'^(  floor_toolsets:\s*\[[^\]]*\])\s*$', new_txt, re.M)
+    if m:
+        open(new_p, "w").write(new_txt[:m.start()] + old_val + new_txt[m.end():])
+PYEOF
+      [ $? -eq 0 ] || { say "  ✗ floor_toolsets merge failed — rolling back whole plugin tree"; rollback_tree "$PLUGIN_DIR" "$TREE_BACKUP"; FAILED+=("$P:floor-merge"); jadd "{\"profile\":\"$P\",\"step\":\"floor-merge\",\"ok\":false}"; continue; }
+    fi
+  fi
 
   # ---------- 5. VERIFY ----------
   GRANT_CFG="${TH}/config.yaml"
