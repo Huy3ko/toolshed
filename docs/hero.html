@@ -39,8 +39,8 @@
   <path d="M 418 100 L 426 104 L 426 111 Q 426 117 418 120 Q 410 117 410 111 L 410 104 Z" fill="none" stroke="#2563eb" stroke-width="1.8"/>
   <text x="443" y="113" font-size="15" font-weight="700" fill="#1e40af">EXTERNAL PROXY <tspan fill="#2563eb" font-weight="400">— outside the agent core</tspan></text>
   <text x="418" y="146" font-size="13.5" fill="#0f172a">•  deterministic rules (local, free)</text>
-  <text x="418" y="168" font-size="13.5" fill="#0f172a">•  per-profile state &amp; grants</text>
-  <text x="418" y="190" font-size="13.5" fill="#0f172a">•  cache-stable session surfaces</text>
+  <text x="418" y="168" font-size="13.5" fill="#0f172a">•  stable baseline surface per session</text>
+  <text x="418" y="190" font-size="13.5" fill="#0f172a">•  controlled recovery; expanded tools persist</text>
   <rect x="400" y="200" width="480" height="22" rx="5" fill="#eff6ff"/>
   <text x="412" y="215" font-size="11" fill="#475569">ⓘ  the agent core is never modified — Toolshed only decides what the provider request carries</text>
 
@@ -89,14 +89,15 @@
   <!-- narrow -> model -->
   <path d="M 855 318 Q 900 350 855 395 L 858 420" fill="none" stroke="#059669" stroke-width="2.5" marker-end="url(#ag)"/>
 
-  <!-- ============ INSTALL != AUTHORIZATION ============ -->
-  <rect x="990" y="255" width="255" height="60" rx="10" fill="#fef2f2" stroke="#dc2626" stroke-width="2"/>
+  <!-- ============ WHAT TOOLSHED IS / ISN'T ============ -->
+  <rect x="990" y="255" width="255" height="80" rx="10" fill="#fef2f2" stroke="#dc2626" stroke-width="2"/>
   <circle cx="1020" cy="285" r="13" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
   <rect x="1014" y="279" width="12" height="10" rx="2" fill="none" stroke="#dc2626" stroke-width="1.8"/>
   <path d="M 1016 279 L 1016 276 Q 1020 273 1024 276 L 1024 279" fill="none" stroke="#dc2626" stroke-width="1.8"/>
-  <text x="1043" y="282" font-size="13" font-weight="700" fill="#991b1b">Install ≠ authorization</text>
-  <text x="1043" y="300" font-size="12" fill="#64748b">fail-closed by design</text>
-  <path d="M 900 210 Q 960 230 988 252" fill="none" stroke="#dc2626" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="1043" y="278" font-size="10.5" font-weight="700" fill="#991b1b">NOT AN AUTHORIZATION BOUNDARY</text>
+  <text x="1043" y="294" font-size="10.5" fill="#475569">routing / context efficiency only</text>
+  <text x="1043" y="307" font-size="10" fill="#64748b">recovery checks registry, not permissions</text>
+  <text x="1043" y="322" font-size="10" fill="#64748b">no semantic discovery layer in v0.1.x</text>
 
   <!-- ============ CACHE HIT ============ -->
   <rect x="885" y="390" width="250" height="70" rx="10" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
@@ -104,17 +105,18 @@
   <path d="M 918 415 L 910 428 L 916 428 L 912 438 L 922 424 L 916 424 Z" fill="#059669"/>
   <text x="938" y="422" font-size="13" font-weight="700" fill="#065f46">CACHE HIT EVERY TURN</text>
   <text x="938" y="440" font-size="12" fill="#64748b">stable prefix = cheap turns</text>
-  <text x="938" y="455" font-size="11" fill="#94a3b8">session-sticky surface never re-prunes</text>
+  <text x="938" y="455" font-size="11" fill="#94a3b8">expanded toolsets persist for the session</text>
   <path d="M 852 430 L 883 428" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#ag)"/>
 
   <!-- ============ CAPABILITY MISSING / RECOVER ============ -->
-  <rect x="75" y="415" width="290" height="75" rx="10" fill="#fef2f2" stroke="#dc2626" stroke-width="2"/>
+  <rect x="75" y="410" width="290" height="95" rx="10" fill="#fef2f2" stroke="#dc2626" stroke-width="2"/>
   <circle cx="105" cy="445" r="13" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
   <path d="M 98 452 L 108 438" stroke="#dc2626" stroke-width="2.5"/>
   <path d="M 104 436 L 110 440 L 106 445 Z" fill="#dc2626"/>
-  <text x="128" y="442" font-size="13" font-weight="700" fill="#991b1b">CAPABILITY MISSING?</text>
-  <text x="128" y="460" font-size="13" font-weight="600" fill="#0f172a">Recover: add that toolset</text>
-  <text x="128" y="478" font-size="11" fill="#94a3b8">permanent this session · normal checks still apply</text>
+  <text x="128" y="438" font-size="13" font-weight="700" fill="#991b1b">CAPABILITY MISSING?</text>
+  <text x="128" y="456" font-size="11.5" font-weight="600" fill="#0f172a">request_toolset — explicit</text>
+  <text x="128" y="473" font-size="11.5" font-weight="600" fill="#0f172a">middleware recovery — automatic</text>
+  <text x="128" y="490" font-size="10.5" fill="#64748b">registered toolsets · no session restart</text>
   <path d="M 518 445 L 373 447" fill="none" stroke="#dc2626" stroke-width="2" marker-end="url(#ar)"/>
   <text x="395" y="437" font-size="11" fill="#94a3b8">missing tool mid-task?</text>
 
