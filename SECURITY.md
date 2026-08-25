@@ -35,7 +35,11 @@ You will receive an initial response within 7 days.
 - **Install ≠ authorization.** Without the grant, Toolshed stays inactive
   (fail-closed) and never manipulates the tool surface.
 - Routing errors within granted permissions degrade to the built-in
-  recovery path (`request_toolset`), not to functionality loss.
+  recovery path (`request_toolset`, plus automatic middleware recovery for
+  registered-but-filtered tools), not to functionality loss.
+- **Scope note:** the recovery paths check registry existence, not permissions.
+  Toolshed is a routing/context-efficiency layer, not an authorization boundary —
+  access control remains Hermes' job.
 - Malicious text in repositories, issues, tool descriptions, or prompts
   cannot expand grants or change routing policy.
 

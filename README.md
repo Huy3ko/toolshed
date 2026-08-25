@@ -31,7 +31,7 @@ Toolshed sits outside the agent core and reduces that surface before the request
 
 - **Narrow when confident** — the likely working set plus protected floor tools go to the model.
 - **Fail open when uncertain** — low confidence keeps the full surface instead of risking capability loss.
-- **Recover when needed** — a missing toolset can be added during the session through `request_toolset`.
+- **Recover when needed** — a missing toolset can be added mid-session through `request_toolset`, or automatically when the agent calls a registered-but-filtered tool (middleware recovery).
 - **Keep agents isolated** — routes, grants, learning and telemetry stay profile-local.
 - **No silent privileges** — Toolshed cannot touch the tool surface without Hermes' explicit `tools.override` grant.
 
@@ -129,15 +129,47 @@ Hermes keeps working without Toolshed. The upstream uninstaller may leave the gr
 config — it doesn't keep anything running, but remove it if you don't want it retained for a possible
 reinstall.
 
+## Session semantics: stable baseline + controlled mid-session recovery
+
+The router projects a narrow **baseline surface** at the start of a session (predicted working set
+plus protected floor tools). This baseline is not re-routed arbitrarily mid-session — but a session
+does **not** need to be restarted when an additional capability turns out to be needed later.
+
+There are two defined recovery paths, and both take effect within the same session:
+
+1. **Explicit — `request_toolset`.** A small escape-hatch tool that stays available after narrowing.
+   The agent can request one or more registered toolsets by name, or resolve a known tool via its
+   `tool_name` parameter. Expansion takes effect immediately and persists for the rest of the
+   session. Unknown toolset names fail closed with closest-match suggestions and the list of
+   available toolsets.
+2. **Automatic — middleware recovery.** If the agent calls a *registered* tool that was filtered out
+   of the current surface, middleware expands the owning toolset before dispatch so the original
+   call executes instead of failing with "invalid tool". This is automatic recovery, not a new
+   router projection and not explicit agent intent.
+
+A successfully expanded toolset remains available for the remainder of the session.
+
+> **What Toolshed is not:** Toolshed is a routing and context-efficiency layer, **not an
+> authorization boundary**. The recovery paths check registry existence, not permissions — if the
+> relevant tool/toolset is registered, it can be requested through the recovery path. Access control
+> remains Hermes' job (plugin grants, tool approvals). Do not deploy Toolshed as a security
+> perimeter.
+
+There is no semantic discovery layer in v0.1.x: a capability must be resolvable as a registered
+toolset or tool name to be recovered. Controlled experiments with passive capability indexes showed
+no measurable causal benefit over this recovery model, so it ships deliberately without one.
+
 ## Security model
 
 Toolshed changes which tools the model sees, so its contract is explicit:
 
 - **Fail-closed on authorization:** no `tools.override` grant → no surface manipulation.
 - **Fail-open on routing uncertainty:** uncertainty keeps capabilities rather than removing them.
-- **Recovery stays native:** missing registered capabilities can be recovered during the session.
+- **Recovery stays native:** missing registered capabilities can be recovered during the session
+  (explicit `request_toolset` or automatic middleware recovery — see "Session semantics" above).
 - **Floor policy is not content-controlled:** prompt or repository text cannot rewrite it.
 - **Routing ≠ permission:** making a tool visible never creates permissions the agent didn't have.
+  Recovery checks registry existence, not authorization.
 - **Profile state stays isolated** across agents.
 
 Adversarial testing covered manipulated repository content, read-only GitHub workflows, recovery,

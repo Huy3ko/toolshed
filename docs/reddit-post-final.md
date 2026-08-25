@@ -79,7 +79,10 @@ We also tested adding a new MCP tool after installation. Toolshed picked up the 
 
 Toolshed doesn't constantly reshuffle the tool surface on every turn.
 
-Once a useful surface has been selected for a session, it stays stable unless recovery is required.
+Once a useful baseline surface has been selected for a session, it stays stable unless recovery is
+required — and recovery does not require restarting the session: `request_toolset` (explicit) or
+automatic middleware recovery add the registered toolset mid-session, and it stays available for
+the rest of the session.
 
 That means the provider sees a smaller and more stable prefix:
 
