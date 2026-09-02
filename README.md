@@ -53,7 +53,7 @@ that's `default`. With several agents, repeat these steps for every profile.
 ```bash
 # 1. Install from the v0.1.7 release commit
 hermes -p default plugins install Huy3ko/toolshed/runtime \
-  --ref <v0.1.7-commit-sha>
+  --ref 23b6c197ca9c19e8733cc222f49ebce91fe00032
 
 # 2. Authorize the tool-surface override
 hermes -p default plugins enable hermes-token-router --allow-tool-override
@@ -92,7 +92,7 @@ One profile = one agent = isolated state:
 
 ```bash
 hermes -p coding plugins install Huy3ko/toolshed/runtime \
-  --ref <v0.1.7-commit-sha>
+  --ref 23b6c197ca9c19e8733cc222f49ebce91fe00032
 hermes -p coding plugins enable hermes-token-router --allow-tool-override
 ```
 
@@ -112,7 +112,7 @@ hermes -p default plugins update hermes-token-router
 payload updater for a controlled update:
 
 ```bash
-runtime/update.sh --profile default --ref <v0.1.7-commit-sha>
+runtime/update.sh --profile default --ref 23b6c197ca9c19e8733cc222f49ebce91fe00032
 ```
 
 After updating, run the bundled doctor and check version/commit, grant,
