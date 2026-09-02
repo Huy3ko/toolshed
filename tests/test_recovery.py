@@ -1,14 +1,26 @@
 """Recovery-/Fail-open-Integrationstests (skizziert; E2E auf frischem Profil
 erfolgt manuell nach der Skill-Anleitung hermes-plugin-testing)."""
 
-import json
-
-
 def test_recovery_tool_schema_shape():
-    """Das request_toolset-Schema muss validierbar sein und toolsets akzeptieren."""
-    from toolshed.tools import build_recovery_tool_schema  # noqa: F401
-    # Detail-Assertions folgen, sobald das Paket aus einem frischen Profil heraus
-    # geladen wird (Hermes-Registry nötig). Platzhalter für CI-Grün.
+    """Das request_toolset-Schema muss die dokumentierten Felder enthalten."""
+    from toolshed.router_tools import build_recovery_tool_schema
+
+    schema = build_recovery_tool_schema({"web", "terminal"})
+    parameters = schema["parameters"]
+    assert parameters["type"] == "object"
+    assert parameters["additionalProperties"] is False
+    assert parameters["properties"]["toolsets"] == {
+        "type": "array",
+        "items": {"type": "string"},
+        "minItems": 1,
+        "uniqueItems": True,
+        "description": parameters["properties"]["toolsets"]["description"],
+    }
+    assert parameters["properties"]["tool_name"]["type"] == "string"
+    assert parameters["properties"]["reason"] == {
+        "type": "string",
+        "maxLength": 200,
+    }
 
 
 def test_config_defaults_are_generic():

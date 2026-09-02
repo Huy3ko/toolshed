@@ -13,18 +13,13 @@ from typing import Any, Dict, Optional, Set
 
 # Shadow learning bridge (optional — never breaks routing)
 try:
-    from learning_store.shadow_hooks import get_shadow
-except Exception as _shadow_import_err:
-    # Hermes may not put the plugin dir on sys.path — add it explicitly
+    from .learning_store.shadow_hooks import get_shadow
+except (ImportError, ValueError) as _shadow_import_err:
+    # Hermes' flat directory loader has no package parent; use the sibling
+    # module directly without mutating sys.path for installed packages.
     try:
-        import os
-        import sys
-        _shadow_dir = os.path.dirname(os.path.abspath(__file__))
-        if _shadow_dir not in sys.path:
-            sys.path.insert(0, _shadow_dir)
         from learning_store.shadow_hooks import get_shadow
         logger = logging.getLogger("hermes_plugins.hermes_token_router")
-        logger.debug("%s: shadow import via sys.path fallback", _shadow_dir)
     except Exception as _shadow_err2:
         logger = logging.getLogger("hermes_plugins.hermes_token_router")
         logger.warning(
@@ -45,6 +40,7 @@ try:
         _get_classifier_connection,
         _get_router_model,
         _get_router_provider,
+        _get_router_mode,
         _is_classifier_enabled,
         _is_router_active,
         _load_config,
@@ -71,7 +67,7 @@ try:
         _get_router_state,
         _store_agent_ref,
     )
-    from .tools import (
+    from .router_tools import (
         RECOVERY_TOOL_NAME,
         RECOVERY_TOOL_SCHEMA,
         RECOVERY_TOOLSET,
@@ -101,6 +97,7 @@ except ImportError:  # pragma: no cover - direct loader fallback
         _get_classifier_connection,
         _get_router_model,
         _get_router_provider,
+        _get_router_mode,
         _is_classifier_enabled,
         _is_router_active,
         _load_config,
@@ -127,7 +124,7 @@ except ImportError:  # pragma: no cover - direct loader fallback
         _get_router_state,
         _store_agent_ref,
     )
-    from tools import (
+    from router_tools import (
         RECOVERY_TOOL_NAME,
         RECOVERY_TOOL_SCHEMA,
         RECOVERY_TOOLSET,
@@ -225,6 +222,19 @@ def _route_tool_surface(source: str, agent: Any = None, **kwargs: Any) -> Option
     turn_id = kwargs.get("turn_id") or getattr(agent, "_current_turn_id", "") or ""
     state = _get_router_state(agent)
 
+    # Capture Hermes' original grant before _apply_predicted_tools mutates the
+    # agent's visible enabled_toolsets. Without this snapshot recovery could
+    # expand from the process-global registry into an unauthorized toolset.
+    if not state.capture_authorization(agent):
+        _restore_full_tools(agent)
+        state.active = False
+        state.predicted_toolsets = None
+        logger.warning(
+            "%s: no host authorization surface; keeping full tool surface",
+            PLUGIN_NAME,
+        )
+        return None
+
     if not _recovery_is_ready():
         _restore_full_tools(agent)
         state.active = False
@@ -235,15 +245,16 @@ def _route_tool_surface(source: str, agent: Any = None, **kwargs: Any) -> Option
         )
         return None
 
-    # Production policy: classify only the initial tool surface. Later turns
-    # reuse the session-sticky surface so tool schemas remain cache-stable.
-    if state.initial_route_applied and source == "pre_turn_context_build":
-        if turn_id:
-            _mark_turn_routed(agent, state, turn_id, "sticky_surface")
-        return None
-
     if source != "pre_turn_context_build" and _was_turn_routed(agent, state, turn_id):
         logger.debug("%s: skipping duplicate late pre_llm_call for early-routed turn", PLUGIN_NAME)
+        return None
+
+    # A Hermes installation with only the late compatibility hook still needs
+    # the same session-sticky contract. Once the first route is applied, later
+    # turns must reuse that surface instead of rewriting tool schemas.
+    if state.initial_route_applied:
+        if turn_id:
+            _mark_turn_routed(agent, state, turn_id, "sticky_surface")
         return None
 
     def complete() -> None:
@@ -252,6 +263,20 @@ def _route_tool_surface(source: str, agent: Any = None, **kwargs: Any) -> Option
 
     # Get profile config
     profile_cfg = _get_profile_config(cfg)
+    mode = _get_router_mode(profile_cfg)
+    if mode == "invalid":
+        logger.warning(
+            "%s: invalid mode=%r; keeping full tool surface",
+            PLUGIN_NAME, profile_cfg.get("mode"),
+        )
+        if agent is not None:
+            _restore_full_tools(agent)
+            _get_router_state(agent).reset()
+        return complete()
+    if mode == "off":
+        _restore_full_tools(agent)
+        _get_router_state(agent).reset()
+        return complete()
     if not profile_cfg.get("enabled", False):
         return complete()
 
@@ -386,6 +411,28 @@ def _route_tool_surface(source: str, agent: Any = None, **kwargs: Any) -> Option
         sorted(predicted),
     )
 
+    # Shadow mode is observational only: record the prediction but preserve the
+    # full Hermes surface and disable router recovery for this turn.
+    if mode == "shadow":
+        _restore_full_tools(agent)
+        state.active = False
+        state.predicted_toolsets = predicted
+        state._fallback_triggered = False
+        state._retry_pending = False
+        try:
+            shadow = get_shadow()
+            if shadow is not None:
+                shadow.on_turn(
+                    session_id,
+                    intent="unknown",
+                    continuity_refs=[],
+                    recent_toolsets=sorted(predicted),
+                    block_id=turn_id or "session",
+                )
+        except Exception:
+            logger.debug("%s: shadow prediction recording skipped", PLUGIN_NAME)
+        return complete()
+
     # Filter agent.tools to only the predicted toolsets
     try:
         _apply_predicted_tools(agent, predicted, available)
@@ -434,6 +481,7 @@ def _route_tool_surface(source: str, agent: Any = None, **kwargs: Any) -> Option
                 intent=_shadow_intent,
                 continuity_refs=[],
                 recent_toolsets=sorted(predicted),
+                block_id=turn_id or "session",
             )
     except Exception:
         logger.debug("%s: shadow on_turn skipped", PLUGIN_NAME)
@@ -477,7 +525,15 @@ def request_toolset_handler(args: Dict[str, Any], **kwargs: Any) -> str:
             registry.get_toolset_alias_target(name) or name for name in requested_toolsets
         }
     except Exception:
-        available = set()
+        return json.dumps({
+            "ok": False,
+            "requested_toolsets": sorted(requested_toolsets),
+            "requested_tool": requested_tool,
+            "resolved": False,
+            "changed": False,
+            "available_after": False,
+            "reason": "registry_unavailable",
+        })
 
     if not requested_toolsets:
         return json.dumps({
@@ -485,9 +541,13 @@ def request_toolset_handler(args: Dict[str, Any], **kwargs: Any) -> str:
             "error": "toolsets or resolvable tool_name is required",
             "requested_toolsets": [],
             "requested_tool": requested_tool,
+            "resolved": False,
+            "changed": False,
+            "available_after": False,
+            "reason": "missing_request",
         })
 
-    unknown = requested_toolsets - available if available else set()
+    unknown = requested_toolsets - available
     if unknown:
         bad = sorted(unknown)[0]
         suggestions = difflib.get_close_matches(bad, sorted(available), n=5)
@@ -498,6 +558,10 @@ def request_toolset_handler(args: Dict[str, Any], **kwargs: Any) -> str:
             "requested_tool": requested_tool,
             "suggestions": suggestions,
             "available_toolsets": sorted(available),
+            "resolved": False,
+            "changed": False,
+            "available_after": False,
+            "reason": "not_registered",
         })
 
     session_id = str(kwargs.get("session_id") or "")
@@ -511,21 +575,87 @@ def request_toolset_handler(args: Dict[str, Any], **kwargs: Any) -> str:
         })
 
     state = _get_router_state(agent)
+    if not state.authorization_captured and not state.capture_authorization(agent):
+        return json.dumps({
+            "ok": False,
+            "requested_toolsets": sorted(requested_toolsets),
+            "requested_tool": requested_tool,
+            "resolved": False,
+            "changed": False,
+            "available_after": False,
+            "reason": "authorization_unavailable",
+        })
+    unauthorized = requested_toolsets - (state.authorized_toolsets or set())
+    if unauthorized:
+        return json.dumps({
+            "ok": False,
+            "requested_toolsets": sorted(requested_toolsets),
+            "requested_tool": requested_tool,
+            "resolved": False,
+            "changed": False,
+            "available_after": False,
+            "reason": "authorization_denied",
+            "unauthorized_toolsets": sorted(unauthorized),
+        })
+
+    try:
+        target_tool_names = set()
+        for toolset_name in requested_toolsets:
+            target_tool_names.update(registry.get_tool_names_for_toolset(toolset_name) or [])
+    except Exception:
+        return json.dumps({
+            "ok": False,
+            "requested_toolsets": sorted(requested_toolsets),
+            "requested_tool": requested_tool,
+            "resolved": False,
+            "changed": False,
+            "available_after": False,
+            "reason": "toolset_resolution_failed",
+        })
+    if not target_tool_names:
+        return json.dumps({
+            "ok": False,
+            "requested_toolsets": sorted(requested_toolsets),
+            "requested_tool": requested_tool,
+            "resolved": False,
+            "changed": False,
+            "available_after": False,
+            "reason": "empty_toolset",
+        })
+
+    state = _get_router_state(agent)
     if state._full_tool_defs is None:
         _cache_full_toolset(agent)
+    before_names = set(getattr(agent, "valid_tool_names", set()) or set())
+    state._fallback_triggered = False
     for toolset_name in sorted(requested_toolsets):
         _expand_toolset(agent, toolset_name)
     _ensure_recovery_tool(agent)
+    after_names = set(getattr(agent, "valid_tool_names", set()) or set())
+    available_after = target_tool_names <= after_names
+    changed = bool(target_tool_names - before_names)
+    if state._fallback_triggered or not available_after:
+        return json.dumps({
+            "ok": False,
+            "requested_toolsets": sorted(requested_toolsets),
+            "requested_tool": requested_tool,
+            "resolved": True,
+            "changed": changed,
+            "available_after": available_after,
+            "reason": "expansion_failed" if state._fallback_triggered else "not_available_after",
+        })
     state.active = True
     state._retry_pending = False
 
-    enabled_tools = sorted(getattr(agent, "valid_tool_names", set()) or set())
     response = {
         "ok": True,
         "toolsets": sorted(requested_toolsets),
         "requested_tool": requested_tool,
-        "reason": reason,
-        "enabled_tools": enabled_tools,
+        "reason": reason or ("added" if changed else "already_available"),
+        "enabled_tools": sorted(after_names),
+        "resolved": True,
+        "changed": changed,
+        "available_after": True,
     }
     if len(requested_toolsets) == 1:
         response["toolset"] = next(iter(requested_toolsets))
@@ -558,6 +688,17 @@ def tool_request_middleware(**kwargs: Any) -> Optional[Dict[str, Any]]:
         toolset_name = None
     if not toolset_name:
         return None
+    if (
+        not state.authorization_captured
+        or state.authorized_toolsets is None
+        or toolset_name.lower() not in state.authorized_toolsets
+    ):
+        logger.warning(
+            "%s: middleware refused unauthorized toolset=%s",
+            PLUGIN_NAME,
+            toolset_name,
+        )
+        return None
     _expand_toolset(agent, toolset_name)
     if tool_name not in (getattr(agent, "valid_tool_names", set()) or set()):
         return None
@@ -573,14 +714,24 @@ def tool_request_middleware(**kwargs: Any) -> Optional[Dict[str, Any]]:
 
 def on_session_end(**kwargs: Any) -> None:
     session_id = str(kwargs.get("session_id") or "")
-    if session_id:
-        # SHADOW: finalize the session's shadow event
-        try:
-            _shadow = get_shadow()
-            if _shadow is not None:
+    if not session_id:
+        return
+
+    # Hermes v0.21 calls this hook after every run_conversation turn. A turn
+    # id therefore marks a block boundary, not the end of the persistent chat
+    # session. Keep the live agent reference for the next turn; only the
+    # no-turn-id lifecycle path represents an actual session shutdown.
+    turn_id = str(kwargs.get("turn_id") or "")
+    try:
+        _shadow = get_shadow()
+        if _shadow is not None:
+            if turn_id:
+                _shadow.finalize(session_id, block_id=turn_id)
+            else:
                 _shadow.finalize(session_id)
-        except Exception:
-            pass
+    except Exception:
+        pass
+    if not turn_id:
         _drop_agent_ref(session_id)
 
 
@@ -665,32 +816,37 @@ def post_tool_call(**kwargs: Any) -> Optional[Dict[str, Any]]:
     if agent is None:
         return None
     state = _get_router_state(agent)
-
-    if not state.active:
-        return None
-
-    # Check if we already expanded — skip repeated expansions for the same turn
-    if state._retry_pending:
-        return None
-
     tool_name = kwargs.get("tool_name", "")
     if not tool_name:
         return None
 
-    # --- SHADOW: book actual usage on EVERY tool call (never routes) ---
-    # Must fire before the early returns below — floor tools never reach the
-    # recovery path, but their usage is exactly what the store must learn.
+    # --- SHADOW: book actual usage even when routing is observe-only ---
+    # Shadow mode deliberately sets state.active=False, so this observation
+    # must happen before the active-router early return.
     try:
         _shadow = get_shadow()
-        if _shadow is not None:
-            # skip the router's own recovery tool — it is not a capability
-            if tool_name not in (RECOVERY_TOOL_NAME, "request_toolset"):
-                from tools.registry import registry
-                _shadow_toolset = _infer_toolset_from_tool(tool_name, registry)
-                if _shadow_toolset:
+        if _shadow is not None and tool_name not in (RECOVERY_TOOL_NAME, "request_toolset"):
+            from tools.registry import registry
+            _shadow_toolset = _infer_toolset_from_tool(tool_name, registry)
+            if _shadow_toolset:
+                try:
+                    _shadow.on_tool_used(
+                        session_id,
+                        _shadow_toolset,
+                        block_id=str(kwargs.get("turn_id") or getattr(agent, "_current_turn_id", "") or "session"),
+                        status=kwargs.get("status"),
+                    )
+                except TypeError:
+                    # Keep compatibility with injected/older observer adapters
+                    # that implement the original two-argument callback.
                     _shadow.on_tool_used(session_id, _shadow_toolset)
     except Exception:
         logger.debug("%s: shadow on_tool_used skipped", PLUGIN_NAME)
+
+    if not state.active:
+        return None
+    if state._retry_pending:
+        return None
 
     try:
         # Check if this tool is already in the current tool set
@@ -710,14 +866,6 @@ def post_tool_call(**kwargs: Any) -> Optional[Dict[str, Any]]:
         # Find which toolset this tool belongs to
         from tools.registry import registry
         missing_toolset = _infer_toolset_from_tool(tool_name, registry)
-
-        # --- SHADOW: book actual usage (never routes) ---
-        try:
-            _shadow = get_shadow()
-            if _shadow is not None and missing_toolset:
-                _shadow.on_tool_used(session_id, missing_toolset)
-        except Exception:
-            logger.debug("%s: shadow on_tool_used skipped", PLUGIN_NAME)
 
         if missing_toolset is None:
             logger.debug(

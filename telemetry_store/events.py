@@ -21,7 +21,8 @@ from typing import Any
 @dataclass
 class ShadowEvent:
     session_id: str
-    signature: str
+    block_id: str = "session"
+    signature: str = ""
     predicted: list[str] = field(default_factory=list)
     actual: list[str] = field(default_factory=list)
     precision: float = 0.0
@@ -43,6 +44,7 @@ class ShadowEvent:
     def from_dict(cls, d: dict[str, Any]) -> "ShadowEvent":
         return cls(
             session_id=str(d.get("session_id", "")),
+            block_id=str(d.get("block_id", "session")),
             signature=str(d.get("signature", "")),
             predicted=list(d.get("predicted", [])),
             actual=list(d.get("actual", [])),

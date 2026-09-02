@@ -10,9 +10,9 @@
 #
 # Exit codes: 0 ok · 1 hermes not found · 5 update failed · 6 verification failed
 
-set -u
+set -u -o pipefail
 
-REPO="Huy3ko/toolshed"
+REPO="Huy3ko/toolshed/runtime"
 PLUGIN_NAME="hermes-token-router"
 JSON=0; REF=""; PROFILES=""; TARGET_USER=""; TARGET_HOME=""
 RESULT_LOG=""
@@ -41,20 +41,66 @@ fi
 # Run-as wrapper: identity = target user when updating a foreign home, else current user
 AS_USER() {
   if [ "$(id -un)" = "$TARGET_USER" ] || [ -z "$TARGET_USER" ]; then
-    env HOME="$TH" "$@"
-    return
+    env HOME="$TH" HERMES_HOME="$TH" "$@"
+    return $?
   fi
   # Foreign identity: execute under the resolved target account with explicit HOME.
   local CMD="$1"; shift
   if [ "$(id -un)" = "root" ]; then
-      runuser -u "$TARGET_USER" -- env HOME="$TH" "$CMD" "$@"
+      runuser -u "$TARGET_USER" -- env HOME="$TH" HERMES_HOME="$TH" "$CMD" "$@"
     else
-      setpriv --reuid="$TARGET_USER" --regid="$TARGET_USER" --init-groups env HOME="$TH" "$CMD" "$@" 2>/dev/null         || { echo "✗ cannot drop privileges to $TARGET_USER from $(id -un) — rerun as root or as $TARGET_USER" >&2; return 1; }
+      setpriv --reuid="$TARGET_USER" --regid="$TARGET_USER" --init-groups env HOME="$TH" HERMES_HOME="$TH" "$CMD" "$@" 2>/dev/null || { echo "✗ cannot drop privileges to $TARGET_USER from $(id -un) — rerun as root or as $TARGET_USER" >&2; return 1; }
     fi
 }
 
-say() { [ "$JSON" = "0" ] && echo "$@"; return 0; }
-jadd() { RESULT_LOG="$RESULT_LOG$1\n"; }
+say() { [ "$JSON" = "0" ] && printf '%s\n' "$*" || true; }
+jadd() {
+  if [ -n "$RESULT_LOG" ]; then RESULT_LOG="${RESULT_LOG},\n"; fi
+  RESULT_LOG="${RESULT_LOG}$1"
+}
+
+# Profile names are used in filesystem paths — strict allowlist, no traversal.
+validate_profile() {
+  case "$1" in
+    ''|*[!A-Za-z0-9_-]*)
+      echo "✗ invalid profile name: '$1' (allowed: [A-Za-z0-9_-]+)" >&2
+      return 1 ;;
+  esac
+  return 0
+}
+
+# Atomic rollback: restore the ENTIRE pre-update plugin tree from the archive.
+# Used on any failure after the tree backup exists; config-only restore is not
+# enough for a layout migration (ADR-0011: no half-states).
+rollback_tree() {
+  local PDIR="$1" TB="$2"
+  AS_USER rm -rf "$PDIR" || { echo "✗ ROLLBACK FAILED: could not remove $PDIR — manual recovery from $TB required" >&2; return 1; }
+  AS_USER tar -xzf "$TB" -C "$(dirname "$PDIR")" || { echo "✗ ROLLBACK FAILED: could not extract $TB — manual recovery required" >&2; return 1; }
+  return 0
+}
+
+
+# Verified rollback: restore the tree, then PROVE the restore worked
+# (dir exists, no v2 marker, ownership intact). A failed rollback is its own
+# hard failure state — never silently continue (helper review 2026-08-24).
+verified_rollback() {
+  local PDIR="$1" TB="$2" STEP="$3"
+  if ! rollback_tree "$PDIR" "$TB"; then
+    say "  ✗✗ ROLLBACK FAILED after step '$STEP' — MANUAL RECOVERY REQUIRED from $TB"
+    FAILED+=("$STEP:rollback-failed")
+    return 1
+  fi
+  # Postconditions: old tree back; a v1 source must lose its v2 marker;
+  # a v2 source must retain that marker after a v2→v2 rollback.
+  if { [ "$LAYOUT" = "v1" ] && grep -q "^layout_version: 2$" "$PDIR/layout_version" 2>/dev/null; } \
+     || [ ! -d "$PDIR" ] \
+     || [ "$(stat -c '%U' "$PDIR")" != "$TARGET_USER" ]; then
+    say "  ✗✗ ROLLBACK INCOMPLETE after step '$STEP' — MANUAL RECOVERY REQUIRED from $TB"
+    FAILED+=("$STEP:rollback-incomplete")
+    return 1
+  fi
+  return 0
+}
 
 # TH: Hermes-Config-Root. Suchkette unten deckt beide Layouts ab:
 #   git-install:    <home>/.hermes/hermes-agent/venv/bin/hermes
@@ -82,21 +128,39 @@ elif [ -n "$TARGET_USER" ]; then
   USER_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
   [ -z "$USER_HOME" ] || [ "$USER_HOME" = "$TARGET_USER" ] && USER_HOME="$TH"
 fi
-HERMES_BIN="$(AS_USER bash -c 'command -v hermes' 2>/dev/null || true)"
-if [ -z "$HERMES_BIN" ]; then
-  for C in "$TH/hermes-agent/venv/bin/hermes" \
-           "$USER_HOME/.hermes/hermes-agent/venv/bin/hermes" \
-           "$USER_HOME/src/hermes-agent/venv/bin/hermes" \
-           "$TH/src/hermes-agent/venv/bin/hermes"; do
-    [ -x "$C" ] && HERMES_BIN="$C" && break
-  done
+# --home receives the user's HOME (e.g. /home/alice), not the .hermes root.
+# Normalize: strip a trailing /.hermes so callers can pass either form.
+case "$TH" in
+  */.hermes) TH="${TH%/.hermes}" ;;
+esac
+# Deterministic target context: USER_HOME and TARGET_USER derive from --home,
+# never from the invoking process. Root must not leak its own HOME here.
+USER_HOME="$TH"
+if [ -z "$TARGET_USER" ]; then
+  TARGET_USER="$(stat -c '%U' "$USER_HOME")"
+  [ -n "$TARGET_USER" ] || { echo "✗ cannot derive owner of $USER_HOME — pass --user explicitly" >&2; exit 4; }
 fi
-[ -z "$HERMES_BIN" ] && say "✗ hermes not found" && jadd '{"ok":false,"reason":"no hermes"}' && [ "$JSON" = "1" ] && printf "%b" "$RESULT_LOG" && exit 1
+TH="$USER_HOME/.hermes"
+
+# Preflight assertions: fail closed BEFORE any install when the target context
+# does not resolve cleanly (multi-user bug class, found in v0.1.6 canary).
+[ -d "$USER_HOME" ] || { echo "✗ target home does not exist: $USER_HOME" >&2; exit 4; }
+[ "$(stat -c '%U' "$USER_HOME")" = "$TARGET_USER" ] || { echo "✗ owner of $USER_HOME is not $TARGET_USER" >&2; exit 4; }
+HERMES_BIN=""
+for C in "$TH/hermes-agent/venv/bin/hermes" \
+         "$USER_HOME/src/hermes-agent/venv/bin/hermes"; do
+  [ -x "$C" ] && HERMES_BIN="$C" && break
+done
+[ -n "$HERMES_BIN" ] || { echo "✗ no hermes binary under $USER_HOME — refusing to guess from caller PATH" >&2; exit 1; }
 
 [ -z "$PROFILES" ] && PROFILES="default"
 IFS=',' read -r -a TARGETS <<< "$PROFILES"
+for P in "${TARGETS[@]}"; do
+  validate_profile "$P" || { echo "✗ aborting — invalid profile in list" >&2; exit 4; }
+done
 
 FAILED=()
+STAMP="$(date +%s)-$$"
 for P in "${TARGETS[@]}"; do
   CFG="$(ls -d "${TH}/profiles/$P/plugins/$PLUGIN_NAME/config.yaml" \
              "${TH}/plugins/$PLUGIN_NAME/config.yaml" 2>/dev/null | head -1)"
@@ -105,14 +169,33 @@ for P in "${TARGETS[@]}"; do
   fi
 
   # ---------- 1. CAPTURE STATE ----------
-  BACKUP="$CFG.preupdate.$(date +%s)"
-  cp "$CFG" "$BACKUP"
+  PLUGIN_DIR="$(dirname "$CFG")"
+  BACKUP="${PLUGIN_DIR}.config.preupdate.$STAMP"
+  AS_USER cp "$CFG" "$BACKUP"
+
+  # Full-tree backup for atomic migration (v1 -> v2 or any failed update).
+  # The whole plugin dir is archived BEFORE anything is replaced; it is
+  # deleted only after every verification passes, and restored wholesale
+  # on any failure. No half-states (ADR-0010/ADR-0011 contract).
+  TREE_BACKUP="${PLUGIN_DIR}.preupdate.$STAMP.tgz"
+  AS_USER tar -czf "$TREE_BACKUP" -C "$(dirname "$PLUGIN_DIR")" "$(basename "$PLUGIN_DIR")"
+  [ -s "$TREE_BACKUP" ] || { FAILED+=("$P:tree-backup"); jadd "{\"profile\":\"$P\",\"step\":\"tree-backup\",\"ok\":false}"; continue; }
 
   OLD_ENABLED=$(grep -m1 '^  enabled:' "$CFG" | awk '{print $2}')
   OLD_MODE=$(grep -m1 '^  mode:' "$CFG" | awk '{print $2}')
   OLD_FLOOR=$(grep -A6 'floor_toolsets:' "$CFG" | head -7)
+  OLD_FLOOR_LINE=$(grep -m1 '^  floor_toolsets:' "$CFG" || true)
   GRANT_BEFORE=$("$HERMES_BIN" -p "$P" plugins capabilities $PLUGIN_NAME 2>/dev/null | grep -c "tools.override: granted")
-  OLD_COMMIT=$(cd "$(dirname "$CFG")" && git rev-parse --short HEAD 2>/dev/null || echo "?")
+  OLD_COMMIT=$(cd "$PLUGIN_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "?")
+
+  # Layout detection via explicit marker, not path guessing.
+  if grep -q "^layout_version: 2$" "$PLUGIN_DIR/layout_version" 2>/dev/null; then
+    LAYOUT="v2"
+  elif [ -d "$PLUGIN_DIR/adr" ] || [ -d "$PLUGIN_DIR/.github" ]; then
+    LAYOUT="v1"
+  else
+    LAYOUT="unknown"
+  fi
 
   say "── Profile: $P ────────────────────────────────────────────"
   say "  before: commit=$OLD_COMMIT enabled=$OLD_ENABLED mode=${OLD_MODE:-active} grant=$GRANT_BEFORE"
@@ -120,51 +203,104 @@ for P in "${TARGETS[@]}"; do
 
   # ---------- 2. UPDATE ----------
   REFARG=(); [ -n "$REF" ] && REFARG=(--ref "$REF")
-  UPD_LOG="/tmp/toolshed_update_$P.log"
-AS_USER "$HERMES_BIN" -p "$P" plugins install "$REPO" ${REFARG+"${REFARG[@]}"} --force > "$UPD_LOG" 2>&1
-UPD_OUT=$(cat "$UPD_LOG")
+  UPD_LOG="${TH}/.toolshed_update_${P}.log"
+  UPD_OUT="$(AS_USER "$HERMES_BIN" -p "$P" plugins install "$REPO" ${REFARG+"${REFARG[@]}"} --force 2>&1)"
+  UPD_RC=$?
+  AS_USER rm -f "$UPD_LOG"
   say "  [debug] upd_out FULL: [$UPD_OUT]"
   # Erfolg = exakte Token-Matches; "Installed"/"Location" können nicht als
   # Substring falsch-matchen, weil beide Tokens installer-eigen sind und
   # "Not Installed"/"Already installed" anders lauten. Kein ^-Anker: der
   # Installer rahmt Output in Unicode-Boxen (│ … │), Zeilenanfänger wäre
   # das Box-Zeichen (Helper-Fund, v0.1.5-Review).
-  if ! echo "$UPD_OUT" | grep -qE "✓ Installed|Plugin installed:"; then
-    say "  ✗ update failed — restoring config from backup"
-    cp "$BACKUP" "$CFG"
+  if [ "$UPD_RC" -ne 0 ] || ! echo "$UPD_OUT" | grep -qE "✓ Installed|Plugin installed:"; then
+    say "  ✗ update failed — rolling back whole plugin tree"
+    if ! verified_rollback "$PLUGIN_DIR" "$TREE_BACKUP" "update"; then continue; fi
     FAILED+=("$P:update"); jadd "{\"profile\":\"$P\",\"step\":\"update\",\"ok\":false}"; continue
   fi
 
-  # ---------- 3. RESTORE USER CONFIG ----------
-  NEW_CFG="$(ls -d "${TH}/profiles/$P/plugins/$PLUGIN_NAME/config.yaml" \
-                 "${TH}/plugins/$PLUGIN_NAME/config.yaml" 2>/dev/null | head -1)"
-  if [ -z "$NEW_CFG" ] || [ ! -f "$NEW_CFG" ]; then
-    cp "$BACKUP" "$NEW_CFG" 2>/dev/null || { FAILED+=("$P:restore"); jadd "{\"profile\":\"$P\",\"step\":\"restore\",\"ok\":false}"; continue; }
+  # ---------- 3. POST-INSTALL VERIFICATION (not just installer text) ----------
+  # Runtime v2 intentionally ships NO user config. Find the installed tree
+  # first, then restore the user's config into it.
+  NEW_PLUGIN_DIR="$(ls -d "${TH}/profiles/$P/plugins/$PLUGIN_NAME" \
+                         "${TH}/plugins/$PLUGIN_NAME" 2>/dev/null | head -1)"
+  if [ -z "$NEW_PLUGIN_DIR" ] || [ ! -d "$NEW_PLUGIN_DIR" ]; then
+    say "  ✗ post-install: new plugin dir not found — rolling back whole plugin tree"
+    if ! verified_rollback "$PLUGIN_DIR" "$TREE_BACKUP" "postinstall-missing"; then continue; fi
+    FAILED+=("$P:postinstall-missing"); jadd "{\"profile\":\"$P\",\"step\":\"postinstall\",\"ok\":false}"; continue
   fi
-  # merge: keep new defaults, but restore user's enabled/mode/floor
-  sed -i "s|^  enabled:.*|  enabled: $OLD_ENABLED|" "$NEW_CFG"
-  if [ -n "$OLD_MODE" ]; then sed -i "s|^  mode:.*|  mode: $OLD_MODE|" "$NEW_CFG"; fi
+  LAYOUT_MARKER="$NEW_PLUGIN_DIR/layout_version"
+  if ! grep -q "^layout_version: 2$" "$LAYOUT_MARKER" 2>/dev/null; then
+    say "  ✗ post-install: layout_version=2 marker missing — rolling back whole plugin tree"
+    if ! verified_rollback "$PLUGIN_DIR" "$TREE_BACKUP" "verify-layout"; then continue; fi
+    FAILED+=("$P:layout-not-v2"); jadd "{\"profile\":\"$P\",\"step\":\"verify-layout\",\"ok\":false}"; continue
+  fi
 
-  # ---------- 4. VERIFY ----------
-  GRANT_CFG="${TH}/config.yaml"
-GRANT_AFTER=0
-[ -f "$GRANT_CFG" ] && grep -A2 "hermes-token-router:" "$GRANT_CFG" | grep -q "allow_tool_override: true" && GRANT_AFTER=1
+  # ---------- 4. RESTORE USER CONFIG (merge, not overwrite) ----------
+  # v2 config ships fresh defaults; only documented user-tunable keys are
+  # carried over from the pre-update config. Unknown v1 keys are NOT copied
+  # (helper review: wholesale overwrite could resurrect permissive v1 values).
+  NEW_CFG="$NEW_PLUGIN_DIR/config.yaml"
+  if [ ! -f "$NEW_CFG" ]; then
+    # v2 payload ships config.template.yaml; materialize the user config from it
+    if [ -f "$NEW_PLUGIN_DIR/config.template.yaml" ]; then
+      AS_USER cp "$NEW_PLUGIN_DIR/config.template.yaml" "$NEW_CFG"
+    fi
+  fi
+  if [ ! -f "$NEW_CFG" ]; then
+    say "  ✗ new config missing — rolling back whole plugin tree"
+    if ! verified_rollback "$PLUGIN_DIR" "$TREE_BACKUP" "restore"; then continue; fi
+    FAILED+=("$P:restore"); jadd "{\"profile\":\"$P\",\"step\":\"restore\",\"ok\":false}"; continue
+  fi
+  AS_USER sed -i \
+    -e "s|^\\(  enabled:\\).*|\\1 $OLD_ENABLED|" \
+    "$NEW_CFG"
+  if [ -n "$OLD_MODE" ]; then
+    AS_USER sed -i "s|^\(  mode:\).*|\1 $OLD_MODE|" "$NEW_CFG"
+  fi
+  # floor_toolsets: preserve the user's list verbatim when present in both.
+  if [ -n "$OLD_FLOOR" ]; then
+    NEW_FLOOR="$(grep -A6 'floor_toolsets:' "$NEW_CFG" | head -7)"
+    if [ -n "$NEW_FLOOR" ]; then
+      # Extract the single-line floor value from the old config and splice it
+      # into the new one. Plain sed: both files use the same one-line list format.
+      OLD_FLOOR_LINE="${OLD_FLOOR_LINE:-}"
+      if [ -n "$OLD_FLOOR_LINE" ]; then
+        AS_USER sed -i "s|^  floor_toolsets:.*|$OLD_FLOOR_LINE|" "$NEW_CFG" \
+          || { say "  ✗ floor_toolsets merge failed — rolling back whole plugin tree"; if ! verified_rollback "$PLUGIN_DIR" "$TREE_BACKUP" "floor-merge"; then continue; fi; FAILED+=("$P:floor-merge"); jadd "{\"profile\":\"$P\",\"step\":\"floor-merge\",\"ok\":false}"; continue; }
+      fi
+    fi
+  fi
+
+  # ---------- 5. VERIFY ----------
+  if [ "$P" = "default" ]; then
+    GRANT_CFG="$TH/config.yaml"
+  else
+    GRANT_CFG="$TH/profiles/$P/config.yaml"
+  fi
+  GRANT_AFTER=0
+  [ -f "$GRANT_CFG" ] && grep -A2 "hermes-token-router:" "$GRANT_CFG" | grep -q "allow_tool_override: true" && GRANT_AFTER=1
   EN_AFTER=$(grep -m1 '^  enabled:' "$NEW_CFG" | awk '{print $2}')
   NEW_COMMIT=$(cd "$(dirname "$NEW_CFG")" && git rev-parse --short HEAD 2>/dev/null || echo "?")
 
   if [ "$EN_AFTER" != "$OLD_ENABLED" ]; then
-    say "  ✗ enabled-state lost ($OLD_ENABLED → $EN_AFTER) — restoring backup"
-    cp "$BACKUP" "$NEW_CFG"
+    say "  ✗ enabled-state lost ($OLD_ENABLED → $EN_AFTER) — rolling back whole plugin tree"
+    if ! verified_rollback "$PLUGIN_DIR" "$TREE_BACKUP" "enabled-lost"; then continue; fi
     FAILED+=("$P:enabled-lost"); jadd "{\"profile\":\"$P\",\"step\":\"verify-enabled\",\"ok\":false}"; continue
   fi
   if [ "$GRANT_BEFORE" = "1" ] && [ "$GRANT_AFTER" = "0" ]; then
-    say "  ✗ grant lost during update — restoring backup"
-    cp "$BACKUP" "$NEW_CFG"
+    say "  ✗ grant lost during update — rolling back whole plugin tree"
+    if ! verified_rollback "$PLUGIN_DIR" "$TREE_BACKUP" "grant-lost"; then continue; fi
     FAILED+=("$P:grant-lost"); jadd "{\"profile\":\"$P\",\"step\":\"verify-grant\",\"ok\":false}"; continue
   fi
 
-  say "  after: commit=$NEW_COMMIT enabled=$EN_AFTER grant=$GRANT_AFTER"
-  jadd "{\"profile\":\"$P\",\"after\":{\"commit\":\"$NEW_COMMIT\",\"enabled\":\"$EN_AFTER\",\"grant\":$GRANT_AFTER},\"ok\":true}"
+  say "  after: commit=$NEW_COMMIT enabled=$EN_AFTER grant=$GRANT_AFTER layout=v2 (was $LAYOUT)"
+  jadd "{\"profile\":\"$P\",\"after\":{\"commit\":\"$NEW_COMMIT\",\"enabled\":\"$EN_AFTER\",\"grant\":$GRANT_AFTER,\"layout_was\":\"$LAYOUT\"},\"ok\":true}"
+
+  # ---------- 7. SUCCESS: only now drop the archived pre-update tree ----------
+  # Migration/update fully verified — the tree backup has served its purpose.
+  AS_USER rm -f "$TREE_BACKUP"
+  AS_USER rm -f "$BACKUP"
 done
 
 FAILCOUNT=${#FAILED[@]}
@@ -172,12 +308,12 @@ if [ "$FAILCOUNT" -eq 0 ]; then
   say ""
   say "✅ Update complete — config, enabled-state and grants preserved."
   jadd '{"summary":"ok"}'
-  [ "$JSON" = "1" ] && printf "%b" "{\n$RESULT_LOG}"
+  [ "$JSON" = "1" ] && printf "[\n%b\n]\n" "$RESULT_LOG"
   exit 0
 else
   say ""
   say "❌ Update had failures: ${FAILED[*]}"
   jadd "{\"summary\":\"failed\"}"
-  [ "$JSON" = "1" ] && printf "%b" "{\n$RESULT_LOG}"
+  [ "$JSON" = "1" ] && printf "[\n%b\n]\n" "$RESULT_LOG"
   exit 6
 fi

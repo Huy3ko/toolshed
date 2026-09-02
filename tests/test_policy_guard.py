@@ -1,9 +1,6 @@
 """ADR-0004: Policy-Guard-Tests — bösartige Toolbeschreibungen dürfen die
 Routing-Policy nicht überschreiben, Floor bleibt unveränderlich."""
 
-import pytest
-
-
 def test_floor_cannot_be_extended_by_tool_description():
     """Eine Tool-Beschreibung, die versucht, sich selbst in den Floor zu
     schreiben oder floor_toolsets zu überschreiben, darf die effektive

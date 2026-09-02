@@ -4,6 +4,37 @@ All notable changes to Toolshed are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [SemVer](https://semver.org/) (0.x = pre-stable).
 
+## [0.1.7] — 2026-09-01
+
+### Fixed
+- Renamed the internal router helper module so the flat Hermes plugin loader
+  cannot shadow Hermes' top-level `tools` package.
+- Kept the routed tool surface session-sticky when Hermes exposes only the
+  `pre_llm_call` compatibility hook.
+- Made profile/session agent-reference collisions fail closed instead of
+  selecting another live agent.
+- Preserved actual tool usage capture in observe-only `shadow` mode.
+- Confined doctor profile paths to the documented profile-name format.
+- Corrected v2→v2 rollback verification and kept Source/Runtime/flat-loader
+  copies aligned.
+- Added concrete recovery-schema and Hermes-loader registration coverage.
+- Captured the original grant before recovery/narrowing and rejected
+  unauthorized expansions fail-closed.
+- Made shadow state profile/home-scoped, successful-usage-only, and
+  block-aware; aligned all config/template copies and removed invalid template
+  frontmatter.
+- Scoped the CI path scan to shipped source/documentation instead of ADR
+  history, and kept stale pre-built wheels out of release snapshots.
+- Made the wheel self-contained with package-relative telemetry imports and
+  declared PyYAML as a runtime dependency.
+- Made installer and updater `--json` output a valid JSON array for one or
+  more profile records.
+- Resolved named profiles from Hermes' context-local home and aligned Doctor's
+  learning-state writability check with that active home.
+- Treated Hermes' per-run `on_session_end` callback as a block boundary while
+  preserving the live agent reference across turns; only a no-turn-id close
+  flushes the whole session.
+
 ## [0.1.6] — 2026-08-24
 
 ### Fixed

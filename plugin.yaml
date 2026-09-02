@@ -1,5 +1,5 @@
 name: hermes-token-router
-version: 0.2.0-rc1
+version: 0.1.7
 description: "First-turn, session-sticky Hermes tool-surface routing with monotonic recovery."
 author: "Toolshed contributors (based on hermes-token-router by Jonathan Rivera)"
 license: MIT

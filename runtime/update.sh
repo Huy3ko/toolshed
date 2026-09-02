@@ -10,7 +10,7 @@
 #
 # Exit codes: 0 ok · 1 hermes not found · 5 update failed · 6 verification failed
 
-set -u
+set -u -o pipefail
 
 REPO="Huy3ko/toolshed/runtime"
 PLUGIN_NAME="hermes-token-router"
@@ -54,7 +54,10 @@ AS_USER() {
 }
 
 say() { [ "$JSON" = "0" ] && printf '%s\n' "$*" || true; }
-jadd() { RESULT_LOG="$RESULT_LOG$1\n"; }
+jadd() {
+  if [ -n "$RESULT_LOG" ]; then RESULT_LOG="${RESULT_LOG},\n"; fi
+  RESULT_LOG="${RESULT_LOG}$1"
+}
 
 # Profile names are used in filesystem paths — strict allowlist, no traversal.
 validate_profile() {
@@ -87,8 +90,10 @@ verified_rollback() {
     FAILED+=("$STEP:rollback-failed")
     return 1
   fi
-  # Postconditions: old tree back, v2 marker gone, ownership correct
-  if [ ! -d "$PDIR" ] || grep -q "^layout_version: 2$" "$PDIR/layout_version" 2>/dev/null \
+  # Postconditions: old tree back; a v1 source must lose its v2 marker;
+  # a v2 source must retain that marker after a v2→v2 rollback.
+  if { [ "$LAYOUT" = "v1" ] && grep -q "^layout_version: 2$" "$PDIR/layout_version" 2>/dev/null; } \
+     || [ ! -d "$PDIR" ] \
      || [ "$(stat -c '%U' "$PDIR")" != "$TARGET_USER" ]; then
     say "  ✗✗ ROLLBACK INCOMPLETE after step '$STEP' — MANUAL RECOVERY REQUIRED from $TB"
     FAILED+=("$STEP:rollback-incomplete")
@@ -177,7 +182,7 @@ for P in "${TARGETS[@]}"; do
   [ -s "$TREE_BACKUP" ] || { FAILED+=("$P:tree-backup"); jadd "{\"profile\":\"$P\",\"step\":\"tree-backup\",\"ok\":false}"; continue; }
 
   OLD_ENABLED=$(grep -m1 '^  enabled:' "$CFG" | awk '{print $2}')
-  OLD_MODE=$(grep -m1 '^  expansion_mode:' "$CFG" | awk '{print $2}')
+  OLD_MODE=$(grep -m1 '^  mode:' "$CFG" | awk '{print $2}')
   OLD_FLOOR=$(grep -A6 'floor_toolsets:' "$CFG" | head -7)
   OLD_FLOOR_LINE=$(grep -m1 '^  floor_toolsets:' "$CFG" || true)
   GRANT_BEFORE=$("$HERMES_BIN" -p "$P" plugins capabilities $PLUGIN_NAME 2>/dev/null | grep -c "tools.override: granted")
@@ -251,7 +256,7 @@ for P in "${TARGETS[@]}"; do
     -e "s|^\\(  enabled:\\).*|\\1 $OLD_ENABLED|" \
     "$NEW_CFG"
   if [ -n "$OLD_MODE" ]; then
-    AS_USER sed -i "s|^\\(  expansion_mode:\\).*|\\1 $OLD_MODE|" "$NEW_CFG"
+    AS_USER sed -i "s|^\(  mode:\).*|\1 $OLD_MODE|" "$NEW_CFG"
   fi
   # floor_toolsets: preserve the user's list verbatim when present in both.
   if [ -n "$OLD_FLOOR" ]; then
@@ -268,9 +273,13 @@ for P in "${TARGETS[@]}"; do
   fi
 
   # ---------- 5. VERIFY ----------
-  GRANT_CFG="${TH}/config.yaml"
-GRANT_AFTER=0
-[ -f "$GRANT_CFG" ] && grep -A2 "hermes-token-router:" "$GRANT_CFG" | grep -q "allow_tool_override: true" && GRANT_AFTER=1
+  if [ "$P" = "default" ]; then
+    GRANT_CFG="$TH/config.yaml"
+  else
+    GRANT_CFG="$TH/profiles/$P/config.yaml"
+  fi
+  GRANT_AFTER=0
+  [ -f "$GRANT_CFG" ] && grep -A2 "hermes-token-router:" "$GRANT_CFG" | grep -q "allow_tool_override: true" && GRANT_AFTER=1
   EN_AFTER=$(grep -m1 '^  enabled:' "$NEW_CFG" | awk '{print $2}')
   NEW_COMMIT=$(cd "$(dirname "$NEW_CFG")" && git rev-parse --short HEAD 2>/dev/null || echo "?")
 
@@ -299,12 +308,12 @@ if [ "$FAILCOUNT" -eq 0 ]; then
   say ""
   say "✅ Update complete — config, enabled-state and grants preserved."
   jadd '{"summary":"ok"}'
-  [ "$JSON" = "1" ] && printf "%b" "{\n$RESULT_LOG}"
+  [ "$JSON" = "1" ] && printf "[\n%b\n]\n" "$RESULT_LOG"
   exit 0
 else
   say ""
   say "❌ Update had failures: ${FAILED[*]}"
   jadd "{\"summary\":\"failed\"}"
-  [ "$JSON" = "1" ] && printf "%b" "{\n$RESULT_LOG}"
+  [ "$JSON" = "1" ] && printf "[\n%b\n]\n" "$RESULT_LOG"
   exit 6
 fi

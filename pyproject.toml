@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "toolshed"
-version = "0.1.6"
+version = "0.1.7"
 description = "An adaptive tool-surface proxy for Hermes — reduces repeated tool-schema overhead while preserving on-demand recovery."
 readme = "README.md"
 license = { text = "MIT" }
@@ -12,10 +12,14 @@ authors = [
   { name = "Toolshed contributors (based on hermes-token-router by Jonathan Rivera)" }
 ]
 requires-python = ">=3.10"
+dependencies = ["PyYAML>=6"]
 
 [tool.setuptools]
 packages = ["toolshed", "toolshed.learning_store", "toolshed.telemetry_store"]
 package-dir = { "" = "src" }
+
+[tool.setuptools.package-data]
+toolshed = ["config.yaml", "plugin.yaml", "config.template.yaml"]
 
 [tool.ruff]
 # Fork erbt Python 3.9-kompatible Annotationen (UP006/UP045/UP035 bewusst offen

@@ -5,4 +5,4 @@ we cannot rely on `importlib.metadata` (which needs an installed dist). We
 keep ONE literal in this file and derive it everywhere — never maintain a
 second copy.
 """
-__version__ = "0.1.4"
+__version__ = "0.1.7"

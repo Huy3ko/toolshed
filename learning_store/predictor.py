@@ -17,7 +17,6 @@ from typing import Any
 
 from .profile_store import ProfileStore
 from .scoring import CANDIDATE_THRESHOLD, HOT_THRESHOLD, toolset_score
-from .signature import canonical_signature
 
 
 class ShadowPredictor:

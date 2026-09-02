@@ -9,10 +9,12 @@ die nicht in der projizierten Tool-Surface liegt — oder nicht weiß, dass sie 
 Anlass für eine Verifizierung war insbesondere die frühere Formulierung, die Surface
 sei "locked/fixed for the duration of the session". Diese Formulierung ist **falsch**
 und wurde in README/SECURITY.md korrigiert.
+# Historical verification note: the observations below describe the pre-v0.1.7
+# recovery behavior. The v0.1.7 implementation now captures the original Hermes
+# grant before narrowing and rejects unauthorized recovery expansions.
 
 ## Untersuchte Codepfade
-
-- `src/toolshed/tools.py` — Recovery-Schema, `_ensure_recovery_tool`,
+- `src/toolshed/router_tools.py` — Recovery-Schema, `_ensure_recovery_tool`,
   `_expand_toolset`, `_apply_predicted_tools`
 - `src/toolshed/__init__.py` — `request_toolset_handler`,
   `tool_request_middleware`, Plugin-Registrierung

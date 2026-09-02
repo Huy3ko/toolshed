@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
 _agent_ref: Any = None
-_agent_refs: Dict[str, Any] = {}
+_agent_refs: Dict[str, Dict[int, Any]] = {}
+_AGENT_REFS_LOCK = threading.RLock()
 
 def _get_agent_from_stack() -> Any:
     """Walk the call stack to find the agent object.
@@ -49,8 +51,28 @@ class RouterState:
         self.initial_route_applied: bool = False
         self.initial_toolsets: Set[str] = set()
         self.active_toolsets: Set[str] = set()
+        self.authorized_toolsets: Optional[Set[str]] = None
+        self.authorization_captured: bool = False
         self.registry_generation: int = 0
         self.expansion_count: int = 0
+
+    def capture_authorization(self, agent: Any) -> bool:
+        """Capture the host-provided toolset grant before narrowing mutates it."""
+        if self.authorization_captured:
+            return self.authorized_toolsets is not None
+        raw = getattr(agent, "enabled_toolsets", None)
+        if not isinstance(raw, (list, tuple, set, frozenset)):
+            self.authorization_captured = True
+            self.authorized_toolsets = None
+            return False
+        granted = {
+            str(name).strip().lower()
+            for name in raw
+            if str(name).strip() and str(name).strip().lower() != "recovery"
+        }
+        self.authorized_toolsets = granted
+        self.authorization_captured = True
+        return True
 
     def set_initial_surface(self, toolsets: Set[str]) -> bool:
         """Set the routed surface once; later calls cannot shrink or replace it."""
@@ -85,6 +107,8 @@ class RouterState:
         self.initial_route_applied = False
         self.initial_toolsets = set()
         self.active_toolsets = set()
+        self.authorized_toolsets = None
+        self.authorization_captured = False
         self.registry_generation = 0
         self.expansion_count = 0
 
@@ -103,33 +127,43 @@ def _get_router_state(agent: Any = None) -> RouterState:
             except Exception:
                 return _router_state
         return state
-    if _agent_ref is not None:
-        return _get_router_state(_agent_ref)
+    cached_agent = _get_agent_ref()
+    if cached_agent is not None:
+        return _get_router_state(cached_agent)
     return _router_state
+
+
 def _store_agent_ref(agent: Any, session_id: Optional[str] = None) -> None:
-    """Store a live agent under its session identity for concurrent safety."""
+    """Store a live agent without guessing when a session key collides."""
     global _agent_ref
-    _agent_ref = agent
     key = session_id or getattr(agent, "session_id", None)
-    if key:
-        _agent_refs[str(key)] = agent
+    with _AGENT_REFS_LOCK:
+        _agent_ref = agent
+        if key:
+            bucket = _agent_refs.setdefault(str(key), {})
+            bucket[id(agent)] = agent
 
 
 def _drop_agent_ref(session_id: str) -> None:
-    """Release a finished session's cached agent reference."""
+    """Release all cached agents for a finished session key."""
     global _agent_ref
-    removed = _agent_refs.pop(str(session_id), None)
-    if removed is _agent_ref:
-        _agent_ref = None
+    with _AGENT_REFS_LOCK:
+        _agent_refs.pop(str(session_id), None)
+        if not _agent_refs:
+            _agent_ref = None
 
 
 def _get_agent_ref(session_id: Optional[str] = None) -> Any:
-    """Resolve by session; ambiguous global lookup deliberately returns None."""
-    if session_id:
-        return _agent_refs.get(str(session_id))
-    unique = {id(agent): agent for agent in _agent_refs.values()}
-    if len(unique) == 1:
-        return next(iter(unique.values()))
-    if not unique:
-        return _agent_ref
-    return None
+    """Resolve only an unambiguous agent reference; otherwise fail closed."""
+    with _AGENT_REFS_LOCK:
+        if session_id:
+            agents = _agent_refs.get(str(session_id), {})
+        else:
+            agents = {
+                agent_id: agent
+                for bucket in _agent_refs.values()
+                for agent_id, agent in bucket.items()
+            }
+        if len(agents) == 1:
+            return next(iter(agents.values()))
+        return None

@@ -223,7 +223,15 @@ def _apply_predicted_tools(
     # Use configured floor toolsets plus prediction; never re-add the full tool list.
     cfg = _get_profile_config(_load_config())
     floor_toolsets = set(cfg.get("floor_toolsets", ["terminal", "file", "web"]))
-    allowed_toolsets = (set(predicted_toolsets) | floor_toolsets) & set(available_toolsets)
+    state = _get_router_state(agent)
+    authorized = state.authorized_toolsets
+    if authorized is None:
+        raise RuntimeError("host authorization surface unavailable")
+    allowed_toolsets = (
+        (set(predicted_toolsets) | floor_toolsets)
+        & set(available_toolsets)
+        & authorized
+    )
 
     if not allowed_toolsets:
         if not predicted_toolsets and not floor_toolsets:
@@ -312,11 +320,20 @@ def _restore_full_tools(agent: Any) -> None:
             agent.valid_tool_names = set(state._full_tool_names)
 def _expand_toolset(agent: Any, toolset_name: str) -> None:
     """Expand the agent's tool set to include a specific toolset."""
+    state = _get_router_state(agent)
+    authorized = state.authorized_toolsets
+    if authorized is None or toolset_name.strip().lower() not in authorized:
+        logger.warning(
+            "%s: refusing unauthorized toolset expansion: %s",
+            PLUGIN_NAME,
+            toolset_name,
+        )
+        state._fallback_triggered = True
+        return
     try:
         from tools.registry import registry
 
         # Get current predicted toolsets
-        state = _get_router_state(agent)
         state.expand_surface({toolset_name})
         if state.predicted_toolsets is not None:
             state.predicted_toolsets.add(toolset_name)

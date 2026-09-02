@@ -44,11 +44,16 @@ that's `default`. With several agents, repeat these steps for every profile.
 > root (`Huy3ko/toolshed`) makes Hermes scan the full development repository — ADRs, CI files,
 > contributor docs — which the security scanner will likely block as DANGEROUS. The `/runtime`
 > path contains only the actual runtime payload.
+>
+> **Termux / Android:** this report originally came from a Termux user. The rule is the same
+> there: install via `Huy3ko/toolshed/runtime`, never via the repo root. The installer and
+> updater scripts require `bash` (Termux's default shell is fine; `sh`/busybox-only setups
+> are not supported).
 
 ```bash
-# 1. Install from GitHub (pinned to the v0.1.6 commit)
+# 1. Install from the v0.1.7 release commit
 hermes -p default plugins install Huy3ko/toolshed/runtime \
-  --ref d33c8bc8ea12d978b21518d41b49ce3b575c266a
+  --ref <v0.1.7-commit-sha>
 
 # 2. Authorize the tool-surface override
 hermes -p default plugins enable hermes-token-router --allow-tool-override
@@ -87,13 +92,14 @@ One profile = one agent = isolated state:
 
 ```bash
 hermes -p coding plugins install Huy3ko/toolshed/runtime \
-  --ref d33c8bc8ea12d978b21518d41b49ce3b575c266a
+  --ref <v0.1.7-commit-sha>
 hermes -p coding plugins enable hermes-token-router --allow-tool-override
 ```
 
-Routes, grants, learning and telemetry stayed profile-local in the validated setup. Because Hermes
-may change profile semantics in future versions, re-verify isolation after upstream updates
-(`hermes profile create --clone` did not copy plugins/grants/state in the validated test).
+Routes, grants, learning and telemetry are intended to remain profile-local. The
+current source uses Hermes' profile home/context as the isolation key, but a
+productive multiplex-gateway isolation run is still a release validation task.
+Re-verify it after upstream profile-semantics changes.
 
 ## Update
 
@@ -101,10 +107,20 @@ may change profile semantics in future versions, re-verify isolation after upstr
 hermes -p default plugins update hermes-token-router
 ```
 
-**Known behavior today:** a force reinstall/update can replace the plugin's `config.yaml`, which
-resets `global.enabled` back to `false`. After updating, check three things: version/commit,
-grant still present, `global.enabled: true`. A config-preserving updater and a `doctor` command
-are planned.
+**Shipped behavior:** the runtime updater preserves `global.enabled`, `mode`,
+`floor_toolsets`, grants and the plugin tree when an update fails. Prefer the
+payload updater for a controlled update:
+
+```bash
+runtime/update.sh --profile default --ref <v0.1.7-commit-sha>
+```
+
+After updating, run the bundled doctor and check version/commit, grant,
+`global.enabled` and `mode`:
+
+```bash
+runtime/doctor.sh --profile default
+```
 
 ## Pinned installs & rollback
 
@@ -169,7 +185,8 @@ Toolshed changes which tools the model sees, so its contract is explicit:
   (explicit `request_toolset` or automatic middleware recovery — see "Session semantics" above).
 - **Floor policy is not content-controlled:** prompt or repository text cannot rewrite it.
 - **Routing ≠ permission:** making a tool visible never creates permissions the agent didn't have.
-  Recovery checks registry existence, not authorization.
+  Recovery is limited to the agent's original Hermes-enabled toolsets and still
+  relies on Hermes for final tool authorization.
 - **Profile state stays isolated** across agents.
 
 Adversarial testing covered manipulated repository content, read-only GitHub workflows, recovery,
@@ -182,9 +199,11 @@ and how to report vulnerabilities.
 - Less permanent tool visibility can reduce spontaneous exploration; required capabilities remained
   recoverable in all validated tests.
 - `plugins install owner/repo` follows the default branch, not the latest release tag.
-- Force reinstall currently resets `global.enabled` — see Update.
-- Validated against Hermes upstream commit `b766607b` / v0.20.5; newer versions may need revalidation.
-- A guided installer, config-preserving updater and `doctor` command are planned, not shipped.
+- The bundled installer/updater/doctor are deterministic shell helpers, but no
+  productive multi-profile lifecycle or restart test is claimed here.
+- Static compatibility targets Hermes v0.21.0 (`b6f42c66` upstream;
+  `78bc2dd4` local); provider, gateway and prompt-cache value still require
+  live validation.
 
 ## Configuration
 

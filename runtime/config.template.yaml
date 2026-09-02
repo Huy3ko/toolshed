@@ -1,21 +1,8 @@
----
-name: config.yaml
-about: Default configuration shipped with Toolshed
-title: toolshed default config
-labels: ''
-assignees: ''
----
-
-# Hermes Tool Router v2 configuration — disabled until explicitly enabled.
-#
-# SETUP (after install):
-#   1. hermes plugins enable hermes-token-router --allow-tool-override
-#   2. set global.enabled: true below (or add a profiles.<name> section)
-#
-# See README "Quick start" for the full flow.
-
+# Hermes Tool Router v2 runtime configuration template.
+# Routing is disabled until explicitly enabled for the target profile.
 global:
-  enabled: false            # ← set to true to activate routing
+  enabled: false
+  mode: active
   routing_scope: first_turn
   expansion_mode: monotonic
   shrink_mid_session: false
@@ -38,12 +25,7 @@ global:
     retain_days: 30
 
 profiles: {}
-  # Optional per-profile overrides. Key = Hermes profile name.
-  # Example:
-  # my-agent:
-  #   enabled: true
 
-# --- Shadow learning bridge (optional, profile-local) ---
 shadow:
   enabled: true
   store_path: learning/profiles.json

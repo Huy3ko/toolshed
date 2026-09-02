@@ -1,6 +1,8 @@
-# Hermes Tool Router v2 configuration — disabled until explicitly enabled.
+# Hermes Tool Router v2 runtime configuration.
+# Routing is disabled until explicitly enabled for the target profile.
 global:
   enabled: false
+  mode: active
   routing_scope: first_turn
   expansion_mode: monotonic
   shrink_mid_session: false
@@ -13,8 +15,8 @@ global:
   auto_recover_registered_tools: true
   classifier:
     enabled: false
-    provider: null  # defaults to direct deepseek when enabled
-    model: null     # defaults to deepseek-chat
+    provider: null
+    model: null
     base_url: null
     api_key_env: null
   metrics:
@@ -22,16 +24,8 @@ global:
     local_only: true
     retain_days: 30
 
-profiles:
-  # Beispiel für ein Profil (Name = Hermes-Profilname):
-  mein-agent:
-    enabled: true
-    # C-arm experiment flag (Design-Skizze Abschnitt 7, 2026-08-23):
-    # injects the frozen capability index once per session after a successful
-    # narrowing. False = B-arm behavior, byte-identical to before.
-    capability_index: false
+profiles: {}
 
-# --- Shadow learning bridge (V2, optional) ---
 shadow:
   enabled: true
   store_path: learning/profiles.json

@@ -15,9 +15,9 @@
 # Contract (ADR-0010): installs from GitHub only; sets global.enabled;
 # verifies routing is REALLY active — never reports success on a half-install.
 
-set -u
+set -u -o pipefail
 
-REPO="Huy3ko/toolshed"
+REPO="Huy3ko/toolshed/runtime"
 PLUGIN_NAME="hermes-token-router"
 JSON=0; YES=0; REF=""; PROFILES=""
 RESULT_LOG=""
@@ -33,7 +33,19 @@ while [ $# -gt 0 ]; do
 done
 
 say() { if [ "$JSON" = "0" ]; then echo "$@"; fi }
-jadd() { RESULT_LOG="$RESULT_LOG$1\n"; }
+jadd() {
+  if [ -n "$RESULT_LOG" ]; then RESULT_LOG="${RESULT_LOG},\n"; fi
+  RESULT_LOG="${RESULT_LOG}$1"
+}
+
+validate_profile() {
+  case "$1" in
+    ''|*[!A-Za-z0-9_-]*)
+      say "✗ invalid profile name: '$1' (allowed: [A-Za-z0-9_-]+)"
+      return 1 ;;
+  esac
+  return 0
+}
 
 # ---------- 1. find hermes ----------
 HERMES_BIN="$(command -v hermes || true)"
@@ -46,7 +58,7 @@ fi
 if [ -z "$HERMES_BIN" ]; then
   say "✗ hermes CLI not found. Install Hermes first."
   jadd '{"step":"detect","ok":false}'
-  [ "$JSON" = "1" ] && printf "%b" "$RESULT_LOG"
+  [ "$JSON" = "1" ] && printf "[\n%b\n]\n" "$RESULT_LOG"
   exit 1
 fi
 say "✓ Hermes found: $HERMES_BIN"
@@ -79,6 +91,9 @@ else
   fi
 fi
 [ ${#TARGETS[@]} -eq 0 ] && say "No profile selected." && exit 3
+for P in "${TARGETS[@]}"; do
+  validate_profile "$P" || exit 4
+done
 
 # ---------- 3. explain + confirm the tools.override grant ----------
 if [ "$YES" = "1" ]; then
@@ -94,7 +109,8 @@ else
   case "$ANSWER" in y|Y|yes|Yes) ;; *) say "Grant denied — aborting."; exit 2 ;; esac
 fi
 
-# ---------- 4. per-profile install ----------
+# Hermes home is explicit when supplied by the host; otherwise use the caller's home.
+HERMES_DIR="${HERMES_HOME:-$HOME/.hermes}"
 FAILED=()
 for P in "${TARGETS[@]}"; do
   say ""
@@ -102,8 +118,16 @@ for P in "${TARGETS[@]}"; do
 
   REFARG=(); [ -n "$REF" ] && REFARG=(--ref "$REF")
 
-  OUT=$("$HERMES_BIN" -p "$P" plugins install "$REPO" "${REFARG[@]+${REFARG[@]}}" --force 2>&1 | tail -3)
-  say "$OUT"
+  if OUT=$("$HERMES_BIN" -p "$P" plugins install "$REPO" "${REFARG[@]+${REFARG[@]}}" --force 2>&1); then
+    INSTALL_RC=0
+  else
+    INSTALL_RC=$?
+  fi
+  say "$(printf '%s\n' "$OUT" | tail -3)"
+  if [ "$INSTALL_RC" -ne 0 ] || ! printf '%s\n' "$OUT" | grep -qE "✓ Installed|Plugin installed:"; then
+    say "  ✗ plugin install failed for profile $P"
+    FAILED+=("$P:install"); jadd "{\"profile\":\"$P\",\"step\":\"install\",\"ok\":false}"; continue
+  fi
 
   ENA=$("$HERMES_BIN" -p "$P" plugins enable $PLUGIN_NAME --allow-tool-override 2>&1)
   say "  grant: $(echo "$ENA" | tail -1)"
@@ -111,15 +135,22 @@ for P in "${TARGETS[@]}"; do
       FAILED+=("$P:grant"); jadd "{\"profile\":\"$P\",\"step\":\"grant\",\"ok\":false}"; continue
   fi
 
-  CFG="/home/$(whoami)/.hermes/profiles/$P/plugins/$PLUGIN_NAME/config.yaml"
-  [ -f "/home/$(whoami)/.hermes/plugins/$PLUGIN_NAME/config.yaml" ] && [ ! -f "$CFG" ] && \
-      CFG="/home/$(whoami)/.hermes/plugins/$PLUGIN_NAME/config.yaml"
+  CFG="$HERMES_DIR/profiles/$P/plugins/$PLUGIN_NAME/config.yaml"
+  [ -f "$HERMES_DIR/plugins/$PLUGIN_NAME/config.yaml" ] && [ ! -f "$CFG" ] && \
+      CFG="$HERMES_DIR/plugins/$PLUGIN_NAME/config.yaml"
 
   if [ -f "$CFG" ]; then
     cp "$CFG" "$CFG.bak.$(date +%s)"
     sed -i '0,/^  enabled: false$/s//  enabled: true/' "$CFG"
   else
     FAILED+=("$P:config"); jadd "{\"profile\":\"$P\",\"step\":\"config\",\"ok\":false}"; continue
+  fi
+
+  EN_AFTER=$(grep -m1 '^  enabled:' "$CFG" | awk '{print $2}')
+  if [ "$EN_AFTER" != "true" ]; then
+    FAILED+=("$P:verify-enabled")
+    jadd "{\"profile\":\"$P\",\"step\":\"verify-enabled\",\"ok\":false}"
+    continue
   fi
 
   CAP=$("$HERMES_BIN" -p "$P" plugins capabilities $PLUGIN_NAME 2>&1 | grep -c "tools.override: granted")
@@ -135,12 +166,12 @@ if [ "$FAILCOUNT" -eq 0 ]; then
   say "✅ Toolshed installed & active for: ${TARGETS[*]}"
   say "   Start a fresh session and check logs for: 'narrowed to N toolsets'"
   jadd '{"summary":"ok"}'
-  [ "$JSON" = "1" ] && printf "%b" "{\n$RESULT_LOG}"
+  [ "$JSON" = "1" ] && printf "[\n%b\n]\n" "$RESULT_LOG"
   exit 0
 else
   say ""
   say "❌ Completed with errors on: ${FAILED[*]}"
   jadd "{\"summary\":\"partial\",\"failed\":$FAILCOUNT}"
-  [ "$JSON" = "1" ] && printf "%b" "{\n$RESULT_LOG}"
+  [ "$JSON" = "1" ] && printf "[\n%b\n]\n" "$RESULT_LOG"
   exit 4
 fi

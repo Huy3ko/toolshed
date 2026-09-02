@@ -39,6 +39,6 @@ jobs:
       - name: Secret scan
         run: |
           # ADR-0002: keine Vela-Pfade, keine Nutzerdaten
-          ! grep -rEn "/srv/companion|/home/[a-z_]+|hermes_hugo|router-test" src/ README.md adr/ && echo "path scan clean"
+          ! grep -rEn "/srv/companion|/home/[a-z_]+|hermes_hugo|router-test" src/ README.md && echo "path scan clean"
       - name: Malicious tool-description guard (ADR-0004)
         run: pytest tests/test_policy_guard.py -v

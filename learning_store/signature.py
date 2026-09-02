@@ -20,7 +20,7 @@ rules first).
 
 from __future__ import annotations
 
-from .observations import Observation, _norm_token, _norm_tokens
+from .observations import Observation, _norm_tokens
 
 
 def canonical_signature(obs: Observation) -> str:

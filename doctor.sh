@@ -29,12 +29,24 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+
+# Profile names are used in filesystem paths — strict allowlist, no traversal.
+validate_profile() {
+  case "$1" in
+    ''|*[!A-Za-z0-9_-]*)
+      echo "✗ invalid profile name: '$1' (allowed: [A-Za-z0-9_-]+)" >&2
+      exit 4 ;;
+  esac
+}
+validate_profile "$PROFILE"
+
 # D4: resolve the target .hermes dir — default $HOME/.hermes, or --home override
 # --home accepts EITHER the parent dir (~/) or the .hermes dir itself.
 # Detection: if a plugins/ or config.yaml exists directly under the given path,
 # it IS the .hermes dir; otherwise append .hermes.
 if [ -n "$HERMES_HOME" ]; then
-  if [ -d "$HERMES_HOME/plugins" ] || [ -f "$HERMES_HOME/config.yaml" ]; then
+  if [ "$(basename "$HERMES_HOME")" = ".hermes" ] \
+      || [ -d "$HERMES_HOME/plugins" ] || [ -f "$HERMES_HOME/config.yaml" ]; then
     HERMES_DIR="$HERMES_HOME"
   else
     HERMES_DIR="$HERMES_HOME/.hermes"
@@ -88,14 +100,16 @@ else
 
   # 6. mode valid
   MODE=$(grep -m1 '^  mode:' "$CFG" 2>/dev/null | awk '{print $2}')
-  if [ "$MODE" = "active" ] || [ "$MODE" = "shadow" ]; then ok "mode: $MODE"
+  if [ "$MODE" = "off" ] || [ "$MODE" = "active" ] || [ "$MODE" = "shadow" ]; then ok "mode: $MODE"
   elif [ -z "$MODE" ]; then info "mode not set — defaults to active"; else bad "unknown mode: $MODE"; fi
 
   # 7. floor_toolsets readable
   if grep -q 'floor_toolsets:' "$CFG"; then ok "floor_toolsets configured"; else warn "floor_toolsets not found in config"; fi
 
-  # 8. profile state writable
-  STATEDIR=$(dirname "$CFG")/learning
+  # ShadowHooks resolves relative learning paths below the active Hermes home,
+  # not below the installed plugin directory.
+  if [ "$PROFILE" = "default" ]; then SHADOW_HOME="$HERMES_DIR"; else SHADOW_HOME="$HERMES_DIR/profiles/$PROFILE"; fi
+  STATEDIR="$SHADOW_HOME/learning"
   mkdir -p "$STATEDIR" 2>/dev/null && touch "$STATEDIR/.doctor-write-test" 2>/dev/null \
     && ok "state dir writable ($STATEDIR)" && rm -f "$STATEDIR/.doctor-write-test" \
     || warn "state dir NOT writable ($STATEDIR)"

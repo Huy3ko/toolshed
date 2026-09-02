@@ -30,17 +30,21 @@ def _get_profile_config(cfg: dict) -> dict:
 
     Merges: profile-specific settings → global defaults → built-in defaults.
     """
-    # Determine active profile from env (in priority order).
+    # Determine active profile from explicit env first, then Hermes' active
+    # context-local home. The latter is required for multiplexed gateway runs,
+    # where Hermes deliberately does not mutate os.environ per profile.
     explicit_profile = os.environ.get("HERMES_PROFILE") or \
                        os.environ.get("HERMES_ACTIVE_PROFILE")
 
     if explicit_profile:
         profile_name = explicit_profile
     else:
-        # No explicit profile env: infer only from the canonical Hermes home.
-        # Never activate the first enabled profile by insertion order; applying
-        # another profile's policy is less safe than failing closed here.
-        hermes_home = os.environ.get("HERMES_HOME", "")
+        hermes_home = ""
+        try:
+            from hermes_constants import get_hermes_home
+            hermes_home = str(get_hermes_home())
+        except Exception:
+            hermes_home = os.environ.get("HERMES_HOME", "")
         inferred = "default"
         if hermes_home:
             home_path = Path(hermes_home).expanduser().resolve()
@@ -97,6 +101,17 @@ def _get_router_provider(profile_cfg: dict) -> str:
     if not isinstance(router_provider, str) or not router_provider.strip():
         return DEFAULT_ROUTER_PROVIDER
     return router_provider.strip()
+
+
+def _get_router_mode(profile_cfg: dict) -> str:
+    """Return the validated operating mode, or ``invalid`` for fail-open."""
+    raw_mode = profile_cfg.get("mode", "active")
+    if not isinstance(raw_mode, str):
+        return "invalid"
+    mode = raw_mode.strip().lower()
+    return mode if mode in {"off", "active", "shadow"} else "invalid"
+
+
 def _is_router_active(cfg: dict = None) -> bool:
     """Check if router is enabled for the current profile or process override."""
     override = os.environ.get("HERMES_TOKEN_ROUTER_ENABLED", "").strip().lower()
