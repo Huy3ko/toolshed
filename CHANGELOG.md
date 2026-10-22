@@ -4,6 +4,37 @@ All notable changes to Toolshed are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [SemVer](https://semver.org/) (0.x = pre-stable).
 
+## [Unreleased]
+
+### Fixed
+- **The router now actually narrows the tool surface.** The agent reference was
+  resolved by walking the call stack for an `agent` local. `pre_llm_call` is a
+  BOUNDED hook that runs on a daemon worker, where the caller's stack is
+  truncated — so the walk could never succeed, and every turn logged
+  `no agent reference; full set fallback` while the full tool surface stayed
+  active. The agent is now resolved through the session: the inline
+  `tool_request` middleware (which runs in the main thread, where the agent
+  *is* reachable) learns the `session_id → agent` mapping, and the worker hook
+  looks it up by session. No global `current_agent`, so parallel sessions
+  never share an agent; without an unambiguous mapping the router stays
+  fail-open on the full surface.
+- The "no agent reference" warning is now emitted at most once per process
+  instead of once per turn, which had flooded the log.
+- `runtime/` and `src/toolshed/` stay byte-aligned; the fix is mirrored into
+  both copies.
+
+### Added
+- Session-resolution, worker-thread, concurrency, session-isolation and
+  registry-semantics tests (19 new).
+- `tests/test_e2e_real_dispatcher.py` — an end-to-end test against the **real**
+  Hermes dispatcher (no dispatcher mock): it proves that the tool surface is
+  narrowed in the actual plugin path, and that the `floor_toolsets` are
+  preserved. The test skips when no Hermes installation is present.
+- `tests/e2e_setup_env.sh` — builds an isolated `HERMES_HOME` with the repo
+  state installed as the plugin, for the E2E run.
+- `docs/fix-history-session-agent-resolution.md` — root cause, the thread
+  measurements it is based on, the mutation probe, and the E2E proof.
+
 ## [0.1.7] — 2026-09-01
 
 ### Fixed
