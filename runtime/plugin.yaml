@@ -11,5 +11,6 @@ provides_hooks:
   - on_session_end
 provides_middleware:
   - tool_request
+  - llm_request
 provides_tools:
   - request_toolset

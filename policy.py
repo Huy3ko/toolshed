@@ -221,7 +221,8 @@ def _build_dynamic_mcp_rules() -> List[tuple[str, Set[str]]]:
         import hermes_cli.config as hc
         cfg = hc.get_config() if hasattr(hc, "get_config") else {}
         if not cfg:
-            import yaml
+            from .config import _yaml_module
+            yaml = _yaml_module()
             import os
             home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
             for cand in (os.path.join(home, "config.yaml"), "config.yaml"):

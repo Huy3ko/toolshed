@@ -89,6 +89,7 @@ try:
         _resolve_toolset_to_tool_names,
         _restore_full_tools,
     )
+    from .llm_request_routing import llm_request_middleware
 except ImportError:  # pragma: no cover - direct loader fallback
     from config import (
         CONFIG_FILE,
@@ -148,6 +149,7 @@ except ImportError:  # pragma: no cover - direct loader fallback
         _resolve_toolset_to_tool_names,
         _restore_full_tools,
     )
+    from llm_request_routing import llm_request_middleware
 
 try:
     from .__about__ import __version__
@@ -155,6 +157,9 @@ except ImportError:  # flat Hermes plugin loader
     from __about__ import __version__
 
 logger = logging.getLogger(__name__)
+
+# Middleware-Registrierungsstatus (First-Turn-Routing).
+_llm_request_middleware_registered = False
 
 # Registration is checked at plugin startup. If a Hermes update removes either
 # recovery mechanism, routing must fail open rather than leave a narrowed
@@ -798,6 +803,18 @@ def register(ctx) -> None:
     except Exception as exc:
         logger.warning("%s: tool_request middleware unavailable: %s", PLUGIN_NAME, exc)
 
+    # First-Turn-Routing: die Middleware laeuft INLINE (der `pre_llm_call`-Hook
+    # laeuft in einem Worker-Thread, in dem der Agent nicht im Stack liegt) und
+    # darf die `tools`-Liste des Provider-Requests ersetzen. Damit erreicht die
+    # Verengung auch den ersten Request einer Sitzung.
+    global _llm_request_middleware_registered
+    _llm_request_middleware_registered = False
+    try:
+        ctx.register_middleware("llm_request", llm_request_middleware)
+        _llm_request_middleware_registered = True
+    except Exception as exc:
+        logger.warning("%s: llm_request middleware unavailable: %s", PLUGIN_NAME, exc)
+
     try:
         from tools.registry import registry
         recovery_schema = build_recovery_tool_schema(set(registry.get_registered_toolset_names()))
@@ -814,9 +831,11 @@ def register(ctx) -> None:
         logger.warning("%s: failed to register recovery tool: %s", PLUGIN_NAME, exc)
 
     logger.info(
-        "%s plugin registered (routing: pre_llm_call compatibility; middleware: %s; tool: %s)",
+        "%s plugin registered (routing: pre_llm_call compatibility; "
+        "middleware: %s; llm_request: %s; tool: %s)",
         PLUGIN_NAME,
         _recovery_middleware_registered,
+        _llm_request_middleware_registered,
         _recovery_tool_registered,
     )
 

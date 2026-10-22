@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 from pathlib import Path
@@ -12,13 +13,39 @@ PLUGIN_NAME = "hermes-token-router"
 CONFIG_FILE = Path(__file__).resolve().parent / "config.yaml"
 DEFAULT_ROUTER_MODEL = "deepseek-chat"
 DEFAULT_ROUTER_PROVIDER = "deepseek"
+def _yaml_module():
+    """Die im Host verfuegbare YAML-Bibliothek liefern.
+
+    BEVORHER (Befund 23.10.2026): Das Plugin importierte hart `yaml` (PyYAML).
+    PyYAML ist im Hermes-Host NICHT installiert - dort stehen `ruamel.yaml`
+    und Hermes' eigener Wrapper `hermes_yaml`. Der Import schlug fehl, die
+    Konfiguration wurde still zu `{}`, `_get_profile_config` lieferte die
+    Defaults (`enabled=False`) und der Router verengte NIE - ohne sichtbaren
+    Fehler, weil der fail-open-Pfad nur auf DEBUG loggte.
+
+    Deshalb: eine Kette probieren statt einen festen Namen zu erzwingen.
+    `yaml` bleibt an erster Stelle, damit eine Umgebung mit PyYAML
+    unveraendert laeuft.
+    """
+    for module_name in ("yaml", "ruamel.yaml", "hermes_yaml"):
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+        if hasattr(module, "safe_load"):
+            return module
+    raise ImportError(
+        "no YAML library available: tried yaml, ruamel.yaml, hermes_yaml"
+    )
+
+
 def _load_config() -> dict:
     """Load router config from plugin's config.yaml.
 
     Returns a dict with per-profile settings and global defaults merged.
     """
     try:
-        import yaml
+        yaml = _yaml_module()
         if CONFIG_FILE.exists():
             with open(CONFIG_FILE, "r") as f:
                 return yaml.safe_load(f) or {}
