@@ -208,6 +208,72 @@ class AgentLearnedFromInlinePath(unittest.TestCase):
             f"der Router warnt {len(warnungen)}-mal statt einmal - das flutet das Log",
         )
 
+    def test_session_wins_over_a_different_stack_agent(self):
+        """Die Session bestimmt den Agenten, nicht der Stack.
+
+        Kontrastfall zu M1: Die Session kennt Agent A, der Aufrufer-Stack
+        enthaelt Agent B (ein anderer Agent, z. B. ein fremder Turn). Der
+        Router darf NIE B routen - sonst verengt er den falschen Agenten und
+        eine Session greift auf den Zustand einer anderen zu.
+
+        Ohne diese Regel faellt der Router bei Stack-first auf B zurueck."""
+        agent_a = _FakeAgent("sess-a")
+        agent_b = _FakeAgent("sess-b")
+        rt_state._store_agent_ref(agent_a, "sess-a")
+
+        vorher_b = list(agent_b.enabled_toolsets)
+
+        def aufrufer():
+            # 'agent' ist ein Local dieses Frames -> der Stack-Walk faengt B.
+            agent = agent_b
+            runtime.pre_llm_call(
+                session_id="sess-a",
+                user_message="read the file /tmp/notes.txt",
+                conversation_history=[],
+                is_first_turn=True,
+            )
+
+        aufrufer()
+
+        # A (die Session) wurde geroutet ...
+        nachher_a = set(agent_a.enabled_toolsets)
+        self.assertTrue({"file", "terminal"}.issubset(nachher_a),
+                        f"der Session-Agent wurde nicht geroutet: {nachher_a}")
+        # ... und B (der fremde Stack-Agent) wurde NICHT angefasst.
+        self.assertEqual(list(agent_b.enabled_toolsets), vorher_b,
+                         "der Router hat den fremden Stack-Agenten geroutet - "
+                         "die Session-Zuordnung wurde uebergangen")
+
+    def test_middleware_learns_the_mapping_so_later_hooks_can_use_it(self):
+        """Der Lernpunkt sitzt in der Middleware - dort, wo der Agent im
+        Stack erreichbar ist.
+
+        Der Test ruft die Middleware WIRKLICH auf (nicht die Helferfunktion
+        direkt). Danach muss die Session den Agenten kennen, damit der
+        spaeter laufende Worker-Hook ihn ueber die Session findet.
+
+        Ohne den Lernpunkt in der Middleware (M2) bleibt die Session leer und
+        der Worker-Hook routet nicht."""
+        agent = _FakeAgent("sess-lern")
+
+        def middleware_aufrufer(agent):
+            # 'agent' ist ein Parameter dieses Frames - der Stack-Walk sucht
+            # ein Local/Lokal-Attribut NAMENS 'agent' mit 'tools'. Die
+            # Betriebssituation: der Aufrufer hat den Agenten im Frame.
+            runtime.tool_request_middleware(
+                session_id="sess-lern",
+                tool_name="read_file",
+                args={"path": "/tmp/notes.txt"},
+            )
+
+        middleware_aufrufer(agent)
+
+        self.assertIsNotNone(
+            rt_state._get_agent_ref("sess-lern"),
+            "die Middleware hat die Session->Agent-Zuordnung nicht gelernt - "
+            "der Worker-Hook kann den Agenten dann nicht finden",
+        )
+
     def test_two_sessions_are_never_mixed(self):
         """Zwei Sessions, zwei Agenten - keine Vermischung."""
         a = _FakeAgent("sess-1")
