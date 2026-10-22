@@ -65,6 +65,8 @@ try:
         _get_agent_from_stack,
         _get_agent_ref,
         _get_router_state,
+        _note_missing_agent_once,
+        _remember_agent_from_stack,
         _store_agent_ref,
     )
     from .router_tools import (
@@ -122,6 +124,8 @@ except ImportError:  # pragma: no cover - direct loader fallback
         _get_agent_from_stack,
         _get_agent_ref,
         _get_router_state,
+        _note_missing_agent_once,
+        _remember_agent_from_stack,
         _store_agent_ref,
     )
     from router_tools import (
@@ -208,15 +212,35 @@ def _route_tool_surface(source: str, agent: Any = None, **kwargs: Any) -> Option
     if agent is not None:
         _store_agent_ref(agent, session_id)
     else:
-        # The current hook stack is authoritative; a cached session mapping can
-        # be stale after resets or test/profile reloads.
-        agent = _get_agent_from_stack() or _get_agent_ref(session_id)
+        # Der Agent wird ueber die SESSION aufgeloest, nicht ueber den Stack.
+        #
+        # GEMESSEN am laufenden Hermes v0.22.2 (22.10.2026): `pre_llm_call`
+        # laeuft auf einem Daemon-Worker (plugins_dispatch.py:42, 271). Der
+        # Aufrufer-Stack ist dort abgeschnitten - `build_turn_context` mit
+        # seinem `agent`-Local ist NICHT erreichbar. Deshalb fand der
+        # Stack-Walk nie einen Agenten und der Router verengte die
+        # Werkzeugflaeche nie ("no agent reference; full set fallback").
+        #
+        # Die Zuordnung wird an einem INLINE laufenden Punkt gelernt (die
+        # `tool_request`-Middleware laeuft im MainThread) und danach hier
+        # ueber die Session genutzt. Kein globales `current_agent`: zwei
+        # parallele Sessions teilen sich nie einen Agenten.
+        agent = _get_agent_ref(session_id) or _get_agent_from_stack()
         if agent is not None:
             session_id = session_id or str(getattr(agent, "session_id", "") or "")
             _store_agent_ref(agent, session_id)
             logger.info("%s: acquired agent reference for compatibility hook", PLUGIN_NAME)
         else:
-            logger.warning("%s: no agent reference; full set fallback", PLUGIN_NAME)
+            # Kein Agent: die volle Werkzeugflaeche bleibt (fail-open, wie
+            # vom Router-Vertrag gefordert). Der Hinweis erscheint hoechstens
+            # EINMAL je Prozess - sonst floodet er das Log.
+            if _note_missing_agent_once():
+                logger.warning(
+                    "%s: no agent reference for session=%s; full set fallback "
+                    "(the agent is learned on the first inline tool_request; "
+                    "before that, routing stays inactive)",
+                    PLUGIN_NAME, session_id or "?",
+                )
             return None
 
     turn_id = kwargs.get("turn_id") or getattr(agent, "_current_turn_id", "") or ""
@@ -675,6 +699,15 @@ def tool_request_middleware(**kwargs: Any) -> Optional[Dict[str, Any]]:
     args = kwargs.get("args")
     if not tool_name or not isinstance(args, dict):
         return None
+    # LERNPUNKT: diese Middleware laeuft INLINE (MainThread) - anders als
+    # alle Hooks, die auf einem Daemon-Worker laufen (gemessen 22.10.2026 am
+    # laufenden Hermes v0.22.2). Hier ist der Agent im Aufrufer-Stack
+    # erreichbar, im `pre_llm_call`-Worker dagegen nicht.
+    #
+    # Deshalb wird die Session->Agent-Zuordnung HIER gelernt und danach von
+    # `pre_llm_call` ueber die Session aufgeloest. Ohne diesen Lernpunkt
+    # bleibt der Router auf "full set fallback" (im Log belegt).
+    _remember_agent_from_stack(session_id)
     agent = _get_agent_ref(session_id)
     if agent is None:
         return None
