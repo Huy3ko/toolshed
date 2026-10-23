@@ -221,7 +221,15 @@ def _build_dynamic_mcp_rules() -> List[tuple[str, Set[str]]]:
         import hermes_cli.config as hc
         cfg = hc.get_config() if hasattr(hc, "get_config") else {}
         if not cfg:
-            from .config import _yaml_module
+            # Der YAML-Loader liegt in `config.py` - im Package-Kontext
+            # relativ, im flachen Layout (Root-Payload, Hermes-Install)
+            # als Geschwister-Modul. Ohne den Fallback schlaegt der Import
+            # im flachen Layout fehl, der Exception-Handler schluckt ihn,
+            # und die MCP-Regeln fallen still auf 0 statt 4 zurueck.
+            try:
+                from .config import _yaml_module
+            except ImportError:  # pragma: no cover - flacher Loader-Fallback
+                from config import _yaml_module
             yaml = _yaml_module()
             import os
             home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))

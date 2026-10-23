@@ -30,7 +30,12 @@ def _yaml_module():
     for module_name in ("yaml", "ruamel.yaml", "hermes_yaml"):
         try:
             module = importlib.import_module(module_name)
-        except Exception:
+        except ImportError:
+            # Diese Bibliothek gibt es hier nicht - die naechste versuchen.
+            continue
+        except Exception as exc:
+            # Importiert, aber nicht benutzbar (z. B. falsche Version).
+            logger.debug("%s: YAML library %s unusable: %s", PLUGIN_NAME, module_name, exc)
             continue
         if hasattr(module, "safe_load"):
             return module

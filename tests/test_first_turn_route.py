@@ -258,7 +258,7 @@ class FirstTurnRouteContract(unittest.TestCase):
         routed = {t["function"]["name"] for t in result["request"]["tools"]}
         self.assertTrue(
             routed.issubset({"terminal", "read_file", "web_search", "memory_search"}),
-            "Route enthaelt Werkzeuge ausserhalb der Host-Freigabe: %s" % routed,
+            f"Route enthaelt Werkzeuge ausserhalb der Host-Freigabe: {routed}",
         )
         # Und die erfasste Autorisierung muss exakt der Host-Freigabe entsprechen.
         self.assertEqual(
@@ -293,11 +293,11 @@ class FirstTurnRouteContract(unittest.TestCase):
         self.assertNotIn(
             "read_file",
             routed,
-            "read_file ist nicht freigegeben, wurde aber geroutet: %s" % routed,
+            f"read_file ist nicht freigegeben, wurde aber geroutet: {routed}",
         )
         self.assertTrue(
             routed.issubset({"terminal", "read_file", "web_search", "memory_search"}),
-            "Route enthaelt Werkzeuge ausserhalb der Host-Freigabe: %s" % routed,
+            f"Route enthaelt Werkzeuge ausserhalb der Host-Freigabe: {routed}",
         )
 
     def test_stack_message_beats_the_wrapped_request_message(self):

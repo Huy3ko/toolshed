@@ -12,13 +12,46 @@ _agent_ref: Any = None
 _agent_refs: Dict[str, Dict[int, Any]] = {}
 _AGENT_REFS_LOCK = threading.RLock()
 
+# "Kein Agent gefunden" wird hoechstens EINMAL je Prozess gemeldet. Ohne diese
+# Sperre loggt der Router in jedem Turn (alle 15 min im Cron, bei jedem
+# Chat-Turn) dieselbe Warnung - das flutet das Log und verdeckt echte Befunde.
+_missing_agent_notice_lock = threading.Lock()
+_missing_agent_notice_emitted = False
+
+
+def _reset_missing_agent_notice() -> None:
+    """Nur fuer Tests: die Einmal-Warnung zuruecksetzen."""
+    global _missing_agent_notice_emitted
+    with _missing_agent_notice_lock:
+        _missing_agent_notice_emitted = False
+
+
+def _note_missing_agent_once() -> bool:
+    """True, wenn dieser Aufruf der erste ist (und der Hinweis geloggt wurde)."""
+    global _missing_agent_notice_emitted
+    with _missing_agent_notice_lock:
+        if _missing_agent_notice_emitted:
+            return False
+        _missing_agent_notice_emitted = True
+        return True
+
+
 def _get_agent_from_stack() -> Any:
     """Walk the call stack to find the agent object.
-    
-    The pre_llm_call hook is invoked from build_turn_context() in agent/turn_context.py,
-    which receives 'agent' as its first parameter. We walk up the stack frames to find it.
-    
-    This avoids any core Hermes modifications — pure Python introspection, update-safe.
+
+    ACHTUNG - dieser Weg funktioniert nur in Threads, in denen der
+    Aufrufer-Stack den Agenten tatsaechlich enthaelt.
+
+    GEMESSEN am laufenden Hermes v0.22.2 (22.10.2026): `pre_llm_call` ist ein
+    BOUNDED Hook (hermes_cli/plugins_dispatch.py:42) und laeuft auf einem
+    Daemon-Worker (Zeile 271). Der Stack des Aufrufers ist dort abgeschnitten,
+    `build_turn_context` mit seinem `agent`-Local also NICHT erreichbar.
+    Belegt im Betrieb: "no agent reference; full set fallback" in jedem Turn.
+
+    Deshalb ist der Stack-Walk nur noch der Notnagel fuer Aufrufstellen, die
+    inline laufen (die `tool_request`-Middleware). Die regulaere Aufloesung
+    geht ueber die Session: `_remember_agent_from_stack` lernt die Zuordnung
+    an einem inline Punkt, `_get_agent_ref(session_id)` nutzt sie danach.
     """
     import sys
     frame = sys._getframe()
@@ -32,6 +65,30 @@ def _get_agent_from_stack() -> Any:
     finally:
         del frame  # prevent reference cycles
     return None
+
+
+def _remember_agent_from_stack(session_id: Optional[str] = None) -> Any:
+    """Lerne den Agenten des Aufrufer-Frames und ordne ihn der Session zu.
+
+    Wird an inline laufenden Aufrufstellen benutzt (die `tool_request`-
+    Middleware laeuft im MainThread, alle Hooks dagegen auf einem Worker).
+    Damit ist der Agent fuer spaetere Worker-Aufrufe ueber die Session
+    erreichbar, ohne ein globales `current_agent` und ohne Core-Aenderung.
+
+    Liefert den gefundenen Agenten (oder None) - fuer Aufrufer, die ihn
+    direkt brauchen.
+    """
+    agent = _get_agent_from_stack()
+    if agent is None:
+        return None
+    key = session_id or getattr(agent, "session_id", None)
+    if key:
+        _store_agent_ref(agent, str(key))
+    else:
+        # Ohne Session-Key ist keine Zuordnung moeglich. Nichts raten: die
+        # Agenten-Referenz bleibt ungebunden und wird nicht verwendet.
+        logger.debug("hermes-token-router: agent found but no session key; not bound")
+    return agent
 
 class RouterState:
     """Per-conversation state for the tool router."""
