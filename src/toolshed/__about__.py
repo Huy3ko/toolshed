@@ -1,8 +1,10 @@
-"""Single-source version: pyproject.toml is the truth.
+"""Toolshed version — single source of truth for the installed plugin.
 
-The flat Hermes plugin loader imports this module directly (no package), so
-we cannot rely on `importlib.metadata` (which needs an installed dist). We
-keep ONE literal in this file and derive it everywhere — never maintain a
-second copy.
+The Hermes directory loader imports this module directly (no package parent),
+so ``importlib.metadata`` cannot be relied on to read the version of a
+directory plugin. This file therefore holds ONE literal, and the release
+process copies it byte-identically into the repo root, ``src/toolshed/`` and
+``runtime/``. ``pyproject.toml`` remains the authority for packaged installs;
+``tests/test_v017_contracts.py`` asserts that every release surface agrees.
 """
-__version__ = "0.1.7"
+__version__ = "0.2.0"

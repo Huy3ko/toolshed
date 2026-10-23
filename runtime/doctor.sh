@@ -62,11 +62,21 @@ warn() { WARN=$((WARN+1)); [ "$JSON" = "0" ] && echo "  ! $1"; jadd "{\"check\":
 bad()  { FAIL=$((FAIL+1)); [ "$JSON" = "0" ] && echo "  ✗ $1"; jadd "{\"check\":\"$1\",\"status\":\"fail\"}"; }
 info() { [ "$JSON" = "0" ] && echo "  ℹ $1"; jadd "{\"check\":\"$1\",\"status\":\"info\"}"; }
 
-HERMES_BIN="$(command -v hermes || true)"
+# D4: the Hermes binary must belong to the SAME home as the plugin tree.
+# `command -v hermes` finds whatever is first in PATH — in a multi-user setup
+# that is the OTHER user's Hermes, and every capability/profile check then
+# reads the wrong home. A wrong binary produces plausible-looking warnings
+# ("could not read capability state", "plugin not shown as enabled") for an
+# installation that is actually healthy, so the home wins over the PATH.
+HERMES_BIN=""
+for C in "$HERMES_DIR/../.local/bin/hermes" \
+         "$HERMES_DIR/hermes-agent/.hermes/bin/hermes" \
+         "$HERMES_DIR/../src/hermes-agent/venv/bin/hermes" \
+         "$HERMES_DIR/hermes-agent/venv/bin/hermes"; do
+  [ -x "$C" ] && HERMES_BIN="$C" && break
+done
 if [ -z "$HERMES_BIN" ]; then
-  for C in "$HERMES_DIR/../src/hermes-agent/venv/bin/hermes" "$HERMES_DIR/hermes-agent/venv/bin/hermes" "$HOME/src/hermes-agent/venv/bin/hermes"; do
-    [ -x "$C" ] && HERMES_BIN="$C" && break
-  done
+  HERMES_BIN="$(command -v hermes || true)"
 fi
 
 [ "$JSON" = "0" ] && echo "Toolshed doctor — profile: $PROFILE"

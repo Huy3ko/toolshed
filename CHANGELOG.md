@@ -4,36 +4,80 @@ All notable changes to Toolshed are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [SemVer](https://semver.org/) (0.x = pre-stable).
 
-## [Unreleased]
-
-### Fixed
-- **The router now actually narrows the tool surface.** The agent reference was
-  resolved by walking the call stack for an `agent` local. `pre_llm_call` is a
-  BOUNDED hook that runs on a daemon worker, where the caller's stack is
-  truncated — so the walk could never succeed, and every turn logged
-  `no agent reference; full set fallback` while the full tool surface stayed
-  active. The agent is now resolved through the session: the inline
-  `tool_request` middleware (which runs in the main thread, where the agent
-  *is* reachable) learns the `session_id → agent` mapping, and the worker hook
-  looks it up by session. No global `current_agent`, so parallel sessions
-  never share an agent; without an unambiguous mapping the router stays
-  fail-open on the full surface.
-- The "no agent reference" warning is now emitted at most once per process
-  instead of once per turn, which had flooded the log.
-- `runtime/` and `src/toolshed/` stay byte-aligned; the fix is mirrored into
-  both copies.
+## [0.2.0] — unreleased
 
 ### Added
-- Session-resolution, worker-thread, concurrency, session-isolation and
-  registry-semantics tests (19 new).
-- `tests/test_e2e_real_dispatcher.py` — an end-to-end test against the **real**
-  Hermes dispatcher (no dispatcher mock): it proves that the tool surface is
-  narrowed in the actual plugin path, and that the `floor_toolsets` are
-  preserved. The test skips when no Hermes installation is present.
-- `tests/e2e_setup_env.sh` — builds an isolated `HERMES_HOME` with the repo
-  state installed as the plugin, for the E2E run.
-- `docs/fix-history-session-agent-resolution.md` — root cause, the thread
-  measurements it is based on, the mutation probe, and the E2E proof.
+- **First-turn routing.** The tool surface is now narrowed in the *first* provider request of a
+  session, not from the second turn onward. v0.1.x could not reach the first turn: the hook that
+  shortens the surface fires before the model has selected a tool, and that tool call is the only
+  source of the knowledge. The selection now runs at the `llm_request` stage, which executes
+  inline with the agent on the stack.
+- **A layer-mirror test** (`tests/test_layer_mirror.py`) enforces that the repository root, the
+  package layer and the distribution payload stay byte-identical. It compares the file *lists* as
+  well as the hashes, so a new file that never reached one layer cannot pass unnoticed.
+- `tests/test_flat_root_payload.py` — the flat loader payload is importable in a subprocess whose
+  `sys.path` contains only the repository root, the dynamic MCP rule build survives the flat
+  layout, and the YAML loader is reachable there.
+
+### Fixed
+- **The router now actually narrows the tool surface.** The agent reference was resolved by
+  walking the call stack for an `agent` local. `pre_llm_call` is a BOUNDED hook that runs on a
+  daemon worker, where the caller's stack is truncated — so the walk could never succeed, and
+  every turn logged `no agent reference; full set fallback` while the full tool surface stayed
+  active. The agent is now resolved through the session: the inline `tool_request` middleware
+  (which runs in the main thread, where the agent *is* reachable) learns the `session_id → agent`
+  mapping, and the worker hook looks it up by session. No global `current_agent`, so parallel
+  sessions never share an agent; without an unambiguous mapping the router stays fail-open on the
+  full surface.
+- **The flat plugin payload is importable again.** The repository root is the flat Hermes loader
+  variant. A relative import without a package parent failed there, was swallowed by the exception
+  handler, and silently produced **zero** dynamic MCP rules instead of four — the MCP servers were
+  no longer routable, without a single error message. The fallback to the sibling module now lives
+  in the file itself.
+- **The configuration is no longer loaded with a hard `import yaml`.** PyYAML is not installed in
+  the Hermes host (it ships `ruamel.yaml` and its own `hermes_yaml` wrapper). The import failed,
+  the configuration was silently `{}`, and the router never narrowed. The loader now tries
+  `yaml` → `ruamel.yaml` → `hermes_yaml`.
+- **The provider message is measured correctly.** The middleware measured the last user message
+  from the request, which in Hermes carries the complete context wrapper (measured: 8910
+  characters for 98 characters of user text). The length guard therefore always declined. The
+  core's `original_user_message` is used instead (measured: 314 characters).
+- **Leading platform frames are stripped** before intent detection. An inbound peer-agent wrapper
+  contains "Reply as you would to a colleague's request", which matched the `(email|mail|reply)`
+  rule and called `mcp-agentmail` instead of the intended capability. Markers in the middle of a
+  message are not treated as a cut point.
+- **Refusal reasons are logged at a level the gateway shows.** All fail-open paths logged on
+  DEBUG, and the gateway logs from WARNING — a skipped narrowing looked exactly like a successful
+  one. The reasons now log on INFO, with the reason instead of the output.
+- **Authorization is captured on the middleware path.** `authorized_toolsets` was only recorded in
+  the hook path. Because `pre_llm_call` runs on a worker thread, the state stayed `None` and the
+  middleware stayed permanently fail-open. The middleware now obtains the state itself — and
+  invents no authorization: a host-set `authorization_captured=True` with
+  `authorized_toolsets=None` remains authoritative.
+- The "no agent reference" warning is now emitted at most once per process instead of once per
+  turn, which had flooded the log.
+- `runtime/` and `src/toolshed/` stay byte-aligned; the fixes are mirrored into all three layers.
+
+### Fixed
+- **The doctor checks the right Hermes installation.** It resolved the `hermes` binary from
+  `PATH`, so in a multi-user setup it read the *other* agent's home and reported
+  "could not read capability state" and "plugin not shown as enabled" for an installation
+  that was healthy. The home now determines the binary; `PATH` is only the fallback.
+
+### Changed
+- The three release surfaces (`pyproject.toml`, `plugin.yaml`, `__about__.py`) now carry a single
+  `__about__.py` content in all layers, so the version cannot drift between them.
+- The tool-surface decision is now written into the provider request's `tools` list while
+  `agent.tools` stays untouched. Hermes' own resolution of hidden tools and the recovery path are
+  therefore preserved unchanged.
+
+### Compatibility
+- Built and validated against **Hermes v0.22.2**. The compatibility statement is a live
+  measurement, not a static claim: the first-turn narrowing was observed in real gateway turns
+  (`48 -> 11 tools`).
+- Toolshed does not modify the Hermes core. It depends on two documented host surfaces — the
+  `llm_request` middleware and the `tools.override` plugin grant. If a future host release changes
+  either, the router degrades to the full surface and logs the reason.
 
 ## [0.1.7] — 2026-09-01
 

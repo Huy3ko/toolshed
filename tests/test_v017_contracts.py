@@ -39,7 +39,7 @@ def _declared_version(path: Path) -> str:
     raise AssertionError(f"no release version found in {path}")
 
 
-def test_all_release_surfaces_use_v017():
+def test_all_release_surfaces_use_v020():
     paths = [
         ROOT / "pyproject.toml",
         ROOT / "plugin.yaml",
@@ -49,7 +49,7 @@ def test_all_release_surfaces_use_v017():
         ROOT / "src" / "toolshed" / "__about__.py",
         ROOT / "src" / "toolshed" / "plugin.yaml",
     ]
-    assert {_declared_version(path) for path in paths} == {"0.1.7"}
+    assert {_declared_version(path) for path in paths} == {"0.2.0"}
 
 
 def test_config_surfaces_are_valid_and_identical():
