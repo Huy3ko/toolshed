@@ -156,3 +156,45 @@ Hinweis "im Repo-Root fehlt sie [llm_request_routing.py]" ist seit
 Aussage, die vier nachgelagerten Dateien seien "bewusst NICHT
 committet" worden: sie sind inzwischen committet - siehe
 `git log` auf `fix/session-agent-resolution`.
+
+## Abgrenzung: trifft der policy.py-Fix den laufenden Betrieb? (23.10.2026, 02:35)
+
+**Nein - der laufende Hermes war nicht betroffen.** Das war nicht
+vorhersehbar und wurde deshalb gemessen, nicht angenommen.
+
+GEMESSEN an der echten Lademechanik (`hermes_cli/plugins_loader.py:718`,
+`_load_directory_module`): Hermes laedt ein Verzeichnis-Plugin als Paket
+`hermes_plugins.<slug>` mit `submodule_search_locations=[plugin_dir]`.
+Der relative Import `from .config import _yaml_module` ist in diesem
+Kontext **immer** aufloesbar - auch im flachen Root-Baum, weil das
+Root-`__init__.py` sein `__path__` auf das Verzeichnis gesetzt bekommt.
+
+GEMESSEN (`hermes_cli/config.py`): es gibt **kein** `get_config`
+(0 Treffer auf `^def get_config`). Damit ist
+`cfg = hc.get_config() if hasattr(hc, 'get_config') else {}` im echten
+Betrieb **immer `{}`** - der `if not cfg:`-Zweig wird also immer
+erreicht. Genau dort sitzt der relative Import.
+
+Messung mit realistischem Stub (hermes_cli.config OHNE get_config),
+Host-config.yaml mit 6 mcp_servers:
+
+| Ladepfad | RULES |
+|---|---|
+| LIVE-Baum als Paket (der echte Hermes-Weg) | 4 |
+| REPO als Paket | 4 |
+| REPO flach, mit Fallback | 4 |
+| LIVE flach, ohne Fallback | **0** |
+
+Bedeutung: Der Live-Betrieb liefert 4 Regeln. Der Fallback ist
+Schadensbegrenzung fuer den **flachen Loader-Pfad** (Root-Payload /
+direkter Import ohne Package-Parent) - der im Repo-Root-Payload-Fall
+tatsaechlich auftritt. Die Live-Installation ist von diesem Defekt
+**nicht** betroffen; sie bleibt unveraendert (Hash-Vergleich: Live
+`llm_request_routing.py` 13418c15, Repo 9ec626f3 - die Live-Datei ist
+eine aeltere Fassung, NICHT der neue Repo-Stand; sie wurde nicht
+angefasst).
+
+**Konsequenz fuer den Betrieb: keine.** Die Live-Installation wurde
+nicht angefasst, kein Gateway-Neustart, kein Reload. Der Fix wirkt
+sich erst beim naechsten Plugin-Reload aus und auch dann nur im
+Root-Payload-Pfad.
