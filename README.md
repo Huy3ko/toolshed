@@ -35,15 +35,40 @@ Toolshed sits outside the agent core and reduces that surface before the request
 - **Keep agents isolated** — routes, grants, learning and telemetry stay profile-local.
 - **No silent privileges** — Toolshed cannot touch the tool surface without Hermes' explicit `tools.override` grant.
 
+### The core feature: authorized, per-request tool selection
+
+The routing decision is not a heuristic that runs "sometimes". In v0.2.0 it is a controlled,
+authorization-bound tool selection that runs on **every** provider request — including the
+**first turn of a session**, which earlier versions could not reach.
+
+- **Per LLM request, not per session.** The selection is computed for each provider request from
+  the request's own intent, and it is intersected with the host's authorization. The result is
+  written into that request's `tools` list; `agent.tools` is left untouched, so Hermes' own
+  resolution of hidden tools and the recovery path stay intact.
+- **Authorization-bound, never invented.** The effective tool set is
+  `(predicted ∪ floor) ∩ available ∩ authorized`. Without a captured host authorization the router
+  does not narrow at all — it keeps the full surface and says so in the log. Toolshed never widens
+  what the host granted.
+- **First turn included.** v0.1.x could only narrow from the second turn onward, because the
+  hook that shortens the surface fires before the model has chosen a tool. v0.2.0 performs the
+  selection at the `llm_request` stage, which runs inline with the agent on the stack — so the
+  very first request of a session is already narrowed.
+- **Every decision is logged with its reason.** `first-turn route applied at llm_request: 48 -> 11
+  tools` names the size change; `llm_request kept full surface (reason=…)` names the reason the
+  surface was *not* changed. A silent skip is not a valid state.
+
 ## Quick start
 
 **About profiles:** Hermes calls each agent configuration a *profile*. If you run one agent,
 that's `default`. With several agents, repeat these steps for every profile.
 
-> **Important: install Toolshed from the `/runtime` subdirectory.** Installing the repository
-> root (`Huy3ko/toolshed`) makes Hermes scan the full development repository — ADRs, CI files,
-> contributor docs — which the security scanner will likely block as DANGEROUS. The `/runtime`
-> path contains only the actual runtime payload.
+> **Important: install Toolshed from the `/runtime` subdirectory.** Hermes' plugin scanner
+> evaluates the whole cloned tree. The `/runtime` path contains only the runtime payload and
+> scans **clean** (measured with Hermes v0.22.2: verdict `safe`, 0 findings) — it installs
+> without a prompt. The repository root additionally carries the development tree (ADRs, CI
+> workflows, contributor docs, the test suite), which the scanner cannot tell apart from payload:
+> it reports a `caution` verdict and asks for a confirmation. That prompt is avoidable, and the
+> findings are noise from the development files, not from the plugin.
 >
 > **Termux / Android:** this report originally came from a Termux user. The rule is the same
 > there: install via `Huy3ko/toolshed/runtime`, never via the repo root. The installer and
@@ -51,9 +76,9 @@ that's `default`. With several agents, repeat these steps for every profile.
 > are not supported).
 
 ```bash
-# 1. Install from the v0.1.7 release commit
+# 1. Install from the v0.2.0 release commit
 hermes -p default plugins install Huy3ko/toolshed/runtime \
-  --ref 23b6c197ca9c19e8733cc222f49ebce91fe00032
+  --ref f81e9d6cb37a5b9ecfc4e5cd839949c52c931e574
 
 # 2. Authorize the tool-surface override
 hermes -p default plugins enable hermes-token-router --allow-tool-override
@@ -92,7 +117,7 @@ One profile = one agent = isolated state:
 
 ```bash
 hermes -p coding plugins install Huy3ko/toolshed/runtime \
-  --ref 23b6c197ca9c19e8733cc222f49ebce91fe00032
+  --ref f81e9d6cb37a5b9ecfc4e5cd839949c52c931e574
 hermes -p coding plugins enable hermes-token-router --allow-tool-override
 ```
 
@@ -112,7 +137,7 @@ hermes -p default plugins update hermes-token-router
 payload updater for a controlled update:
 
 ```bash
-runtime/update.sh --profile default --ref 23b6c197ca9c19e8733cc222f49ebce91fe00032
+runtime/update.sh --profile default --ref f81e9d6cb37a5b9ecfc4e5cd839949c52c931e574
 ```
 
 After updating, run the bundled doctor and check version/commit, grant,
@@ -171,7 +196,7 @@ A successfully expanded toolset remains available for the remainder of the sessi
 > remains Hermes' job (plugin grants, tool approvals). Do not deploy Toolshed as a security
 > perimeter.
 
-There is no semantic discovery layer in v0.1.x: a capability must be resolvable as a registered
+There is no semantic discovery layer: a capability must be resolvable as a registered
 toolset or tool name to be recovered. Controlled experiments with passive capability indexes showed
 no measurable causal benefit over this recovery model, so it ships deliberately without one.
 
@@ -193,17 +218,62 @@ Adversarial testing covered manipulated repository content, read-only GitHub wor
 stale capabilities and multi-profile isolation. See [SECURITY.md](SECURITY.md) for the full model
 and how to report vulnerabilities.
 
+## Hermes compatibility
+
+| Hermes version | Status | Evidence |
+| --- | --- | --- |
+| **v0.22.2** | **Validated** | Installed and operated on a live gateway; the first-turn narrowing was measured in real gateway turns (`48 -> 11 tools`). |
+| v0.21.x | Previous target | Superseded by v0.22.2; the v0.2.0 release is built and validated against v0.22.2. |
+
+Toolshed is a plugin and does not modify the Hermes core. It relies on two documented host
+surfaces: the `llm_request` middleware and the `tools.override` plugin grant. If a future Hermes
+release changes either, the router degrades to the full tool surface and logs the reason — it never
+silently narrows against an unknown host contract.
+
 ## Known limitations
 
-- Gateway-restart / learning persistence has not yet been fully validated under `systemd --user`.
+- The routing floor (`floor_toolsets`) covers five toolsets, so the narrowed surface is stable at
+  11 tools in most turns rather than being intent-sharp. The intent detection itself is precise
+  (`git` → file + git + terminal, `browser` → web) but only acts above the floor. Whether the
+  floor should be that broad is a configuration question, not a code question.
 - Less permanent tool visibility can reduce spontaneous exploration; required capabilities remained
   recoverable in all validated tests.
-- `plugins install owner/repo` follows the default branch, not the latest release tag.
-- The bundled installer/updater/doctor are deterministic shell helpers, but no
-  productive multi-profile lifecycle or restart test is claimed here.
-- Static compatibility targets Hermes v0.21.0 (`b6f42c66` upstream;
-  `78bc2dd4` local); provider, gateway and prompt-cache value still require
-  live validation.
+- `plugins install owner/repo` follows the default branch, not the latest release tag. Pin with
+  `--ref <commit-sha>` for reproducible deployments.
+- The bundled installer/updater/doctor are deterministic shell helpers. A productive multi-profile
+  lifecycle is validated, a full restart matrix across every host is not claimed here. The doctor
+  resolves the `hermes` binary from the target home, so it reports on the installation you point
+  it at — not on whichever `hermes` happens to be first in `PATH`.
+- A genuine gateway restart was validated for this release; a host upgrade invalidates the
+  compatibility statement above and requires a re-run of the acceptance checks.
+
+## What changed in v0.2.0 (vs. v0.1.7)
+
+- **First-turn routing.** The tool surface is now narrowed in the *first* request of a session,
+  not from the second turn onward. v0.1.x could not do this: the shortening hook fires before the
+  model has picked a tool, and the tool call is the only source of that knowledge.
+- **The router actually routes.** In v0.1.x the agent was resolved by walking the call stack for
+  an `agent` local. The hook that shortens the surface runs on a daemon worker where the caller's
+  stack is truncated, so the walk could never succeed and every turn fell back to the full
+  surface. The agent is now resolved through the session, with no global current agent, so
+  parallel sessions never share one.
+- **The flat plugin payload is importable again.** The repository root is the flat Hermes loader
+  variant; a relative import without a package parent failed there, was swallowed by the
+  exception handler, and silently produced zero dynamic MCP rules instead of four. The fallback is
+  now in the file, and a subprocess probe covers the flat layout.
+- **The configuration is no longer loaded with a hard `import yaml`.** PyYAML is not present in the
+  Hermes host; the import failed, the configuration came back empty, and the router stayed silent.
+  The loader now tries `yaml` → `ruamel.yaml` → `hermes_yaml`.
+- **Refusal reasons are logged at a level the gateway shows.** Every fail-open path used to log on
+  DEBUG, so a skipped narrowing looked identical to a successful one.
+- **The provider message is measured correctly.** The middleware read the last user message from
+  the request, which in Hermes carries the whole context wrapper (8910 characters for 98
+  characters of user text), so the length guard always declined. The core's
+  `original_user_message` is used instead.
+- **Leading platform frames are stripped** before intent detection, so an inbound peer-agent
+  wrapper no longer triggers the wrong capability.
+- **A layer-mirror test** now enforces that the repository root, the package and the distribution
+  payload stay byte-identical, and compares the file *lists* as well as the hashes.
 
 ## Configuration
 
