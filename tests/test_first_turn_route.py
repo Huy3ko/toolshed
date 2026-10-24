@@ -349,22 +349,75 @@ class FirstTurnRouteContract(unittest.TestCase):
         result = _AgentScope(self.agent).invoke(request=request, session_id="sess-1")
         self.assertIsNone(result, "bei einem Fehler wurde geroutet")
 
-    def test_second_request_is_not_routed_again(self):
-        """Bedingung 4: session-sticky - der zweite Request bleibt unberuehrt."""
+    def test_second_request_reuses_the_stored_route_without_new_prediction(self):
+        """Bedingung 4: session-sticky - der zweite Request nutzt die
+        GESPEICHERTE Route, ohne eine neue Vorhersage zu machen.
+
+        WIRKLICHKEIT (24.10.2026, Gateway-Live-Messung): Dieser Test
+        schrieb das Fehlverhalten fest. Er verlangte, dass der
+        zweite Request UNVERAENDERT bleibt - damit trug ab dem zweiten
+        Modellaufruf wieder die volle Werkzeugflaeche:
+
+          API call #1: in=21426   (verengt)
+          API call #2: in=49120   (volle Flaeche, +27.694 Token)
+
+        Bei 18 Modellaufrufen (1.162.489 kumulativ abgerechnet) war das
+        17x die volle Flaeche - 4,1 % Einsparung statt der beabsichtigten
+        Halfte. Der urspruengliche Vertrag (ADR-0001: "stabile
+        Werkzeugauswahl innerhalb einer Session") verlangt das Gegenteil.
+
+        Der neue Vertrag: die Auswahl wird EINMAL vorhergesagt und fuer
+        jeden weiteren Request derselben Session erneut ANGEWENDT. Der
+        erhaltene Teil des alten Vertrags: es wird nicht neu VORHERGESAGT
+        (das wuerde eine LLM-Runde pro Request kosten und die Auswahl
+        mitten im Turn springen lassen).
+
+        Der ausfuehrliche Vertrag steht in
+        `tests/test_session_sticky_surface.py`.
+        """
         self._patch_config()
         self._patch("policy._get_available_toolsets",
                     lambda: {"file", "terminal", "web", "memory"})
         self._patch("router_tools._resolve_toolset_to_tool_names",
                     lambda ts: {"read_file", "terminal"})
-        self._patch(llr, "_predict", new=lambda m, c, a: {"file"})
+
+        predict_calls = []
+
+        def _counting_predict(msg, cfg, avail):
+            predict_calls.append(msg)
+            return {"file"}
+
+        self._patch(llr, "_predict", new=_counting_predict)
 
         first = _AgentScope(self.agent).invoke(request=_request(), session_id="sess-1")
         self.assertIsNotNone(first, "die erste Route fehlte")
         self.assertTrue(self.state.initial_route_applied,
                         "der Zustand merkt sich die Route nicht")
+        self.assertEqual(len(predict_calls), 1,
+                         "der erste Request hat nicht genau einmal vorhergesagt")
 
         second = _AgentScope(self.agent).invoke(request=_request(), session_id="sess-1")
-        self.assertIsNone(second, "der zweite Request wurde erneut geroutet")
+
+        # ERHALTEN: keine erneute Vorhersage.
+        self.assertEqual(
+            len(predict_calls), 1,
+            "der zweite Request hat NEU VORHERGESAGT - das kostet eine "
+            "LLM-Runde pro Request und laesst die Werkzeugauswahl "
+            "mitten im Turn springen",
+        )
+        # GEANDERT: die gespeicherte Route wird erneut angewendet.
+        self.assertIsNotNone(
+            second,
+            "der zweite Request wurde NICHT verengt - die Werkzeugflaeche "
+            "waechst im Verlauf der Session wieder auf die volle Flaeche an",
+        )
+        second_names = {t["function"]["name"] for t in second["request"]["tools"]}
+        first_names = {t["function"]["name"] for t in first["request"]["tools"]}
+        self.assertEqual(
+            second_names, first_names,
+            f"die Auswahl ist zwischen den Requests gesprungen: "
+            f"{first_names} -> {second_names}",
+        )
 
     def test_agent_tool_surface_is_not_mutated(self):
         """Bedingung 5: `agent.tools` bleibt voll - die Host-Freigabe intakt."""

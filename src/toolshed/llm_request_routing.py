@@ -104,6 +104,87 @@ def _request_tool_names(request: Dict[str, Any]) -> Set[str]:
     return names
 
 
+def _apply_stored_route(
+    state: Any,
+    request: Dict[str, Any],
+    agent: Any,
+) -> Optional[Dict[str, Any]]:
+    """Die bereits getroffene Route auf einen weiteren Request anwenden.
+
+    Das ist der Kern des Session-Sticky-Vertrags: die Auswahl wird
+    EINMAL getroffen und fuer jeden weiteren Request derselben Session
+    erneut angewendet - ohne neue Vorhersage.
+
+    Beruecksichtigt wird auch, was der Recovery-Pfad seit der ersten
+    Route nachgetragen hat (`state.active_toolsets`): die Verengung ist
+    eine Obergrenzung, kein Verbot. Ein Werkzeug, das der Agent
+    nachweislich gebraucht hat, muss in den folgenden Requests
+    sichtbar bleiben, sonst bricht der laufende Turn.
+
+    Fail-open (ADR-0004): jeder Fehler fuehrt zur unveraenderten
+    (vollen) Werkzeugflaeche, nie zu weniger.
+    """
+    try:
+        try:
+            from .router_tools import _resolve_toolset_to_tool_names
+        except ImportError:  # pragma: no cover - flacher Loader-Fallback
+            from router_tools import _resolve_toolset_to_tool_names
+    except Exception as exc:
+        return _bail("router_internals_unavailable", exc)
+
+    # Die aktive Flaeche ist die Route plus alles, was der Recovery-Pfad
+    # nachgetragen hat. `active_toolsets` ist die Wahrheit ueber das, was
+    # der Agent in dieser Session tatsaechlich sehen darf.
+    active = set(getattr(state, "active_toolsets", None) or ())
+    if not active:
+        active = set(getattr(state, "initial_toolsets", None) or ())
+    if not active:
+        # Ohne gespeicherte Flaeche gibt es nichts anzuwenden: fail-open.
+        return _bail("no_stored_route")
+
+    authorized = getattr(state, "authorized_toolsets", None)
+    if not authorized:
+        # Keine Host-Freigabe erfasst -> fail-open, in jedem Request.
+        return _bail("no_authorization_captured")
+
+    allowed = active & set(authorized)
+    if not allowed:
+        return _bail("empty_allowed_set")
+
+    try:
+        allowed_names = _resolve_toolset_to_tool_names(allowed)
+    except Exception as exc:
+        return _bail("toolset_resolution_failed", exc)
+    if not allowed_names:
+        return _bail("no_tool_names")
+
+    tools_before = request.get("tools") or []
+    kept = [t for t in tools_before if _tool_entry_name(t) in allowed_names]
+    if not kept:
+        # Der Request bringt kein Werkzeug der erlaubten Flaeche mit
+        # (z.B. weil der Host die Request-Flaeche selbst veraendert hat).
+        # Fail-open: der Request bleibt unveraendert.
+        return _bail("nothing_kept")
+
+    kept_names = _request_tool_names({"tools": kept})
+    if kept_names == _request_tool_names(request):
+        # Bereits genau diese Flaeche - der Request braucht keine Aenderung.
+        return None
+
+    new_request = dict(request)
+    new_request["tools"] = kept
+    logger.info(
+        "%s: session-sticky route applied at llm_request: %d -> %d tools "
+        "(session=%s) allowed=%s",
+        PLUGIN_NAME,
+        len(tools_before),
+        len(kept),
+        getattr(agent, "session_id", "") or "?",
+        ",".join(sorted(allowed)),
+    )
+    return {"request": new_request, "source": PLUGIN_NAME}
+
+
 def _find_agent_in_stack() -> Any:
     """Finde den Agenten im Aufrufer-Stack.
 
@@ -383,8 +464,29 @@ def llm_request_middleware(**kwargs: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(state, RouterState):
         return _bail("no_router_state")
     if state.initial_route_applied:
-        # Session-sticky: der erste Request dieses Turns hat entschieden.
-        return _bail("already_routed")
+        # Session-sticky, aber request-sticky UND nicht nur request-sticky:
+        # die EINMAL getroffene Auswahl gilt fuer JEDEN Request dieser
+        # Session. Frueher bailed die Middleware hier mit
+        # `already_routed` - damit trug ab dem zweiten Modellaufruf wieder
+        # die volle Werkzeugflaeche.
+        #
+        # GEMESSENER BEFUND (24.10.2026, Gateway-Live):
+        #   API call #1: in=21426   (verengt, 11 Tools)
+        #   API call #2: in=49120   (volle Flaeche, +27.694 Token)
+        # Bei 18 Modellaufrufen (1.162.489 kumulativ abgerechnet) waren
+        # das 17x die volle Flaeche - 4,1 % Einsparung statt der
+        # beabsichtigten Halfte.
+        #
+        # Der urspruengliche Vertrag (ADR-0001/0004) verlangt "stabile
+        # Werkzeugauswahl innerhalb einer Session". Das ist genau das:
+        # die Auswahl bleibt STABIL, und sie gilt fuer den ganzen Turn.
+        #
+        # Es wird hier BEWUSST keine neue Vorhersage gemacht: das wuerde
+        # eine LLM-Runde pro Request kosten und die Auswahl mitten im
+        # Turn springen lassen. Die gespeicherte Flaeche wird erneut
+        # angewendet, zusammen mit allem, was der Recovery-Pfad seither
+        # nachgetragen hat (`active_toolsets`).
+        return _apply_stored_route(state, request, agent)
 
     # Die Host-Freigabe selbst erfassen. `capture_authorization` liest
     # `agent.enabled_toolsets` - die Werkzeugflaeche, die Hermes dem Agenten
