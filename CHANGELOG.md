@@ -4,7 +4,7 @@ All notable changes to Toolshed are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [SemVer](https://semver.org/) (0.x = pre-stable).
 
-## [0.2.0] — unreleased
+## [0.2.0] — 2026-10-24
 
 ### Fixed
 - **A backup next to the plugin directory could be loaded as a second plugin instance.** Hermes
