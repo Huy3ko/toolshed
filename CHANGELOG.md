@@ -6,6 +6,18 @@ versioning follows [SemVer](https://semver.org/) (0.x = pre-stable).
 
 ## [0.2.0] — unreleased
 
+### Fixed
+- **A backup next to the plugin directory could be loaded as a second plugin instance.** Hermes
+  registers every `plugin.yaml` it finds under a scanned plugins root. A backup of the plugin
+  tree placed there as a *directory* is therefore registered as a second manifest with the same
+  plugin key — same plugin, separate state (measured on Hermes v0.22.2: two manifests, both keyed
+  `hermes-token-router`). The updater's backups are archive *files*, which are not scanned; the
+  documentation now states the rule, `doctor.sh` reports the last backup at the path the updater
+  actually writes to, and it warns when a second instance has appeared next to the plugin.
+  `tests/test_backup_path_agreement.py` pins the contract: the updater's backup path and the
+  doctor's search path stay in sync, no backup is ever created as a directory, and the
+  second-instance behavior is proven against the real Hermes discovery code.
+
 ### Added
 - **First-turn routing.** The tool surface is now narrowed in the *first* provider request of a
   session, not from the second turn onward. v0.1.x could not reach the first turn: the hook that

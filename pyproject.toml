@@ -35,4 +35,8 @@ ignore = ["UP006", "UP045", "UP035", "UP037", "BLE001", "S110", "I001", "SIM102"
 "__init__.py" = ["F401"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff==0.16.4", "PyYAML>=6", "pip-audit>=2.7"]
+# ruamel.yaml is required by the test suite: it imports the real Hermes core
+# (hermes_cli), whose YAML layer is built on ruamel (hermes_yaml). Without it
+# the Hermes-dependent tests fail on `import ruamel.yaml` — an environment
+# gap, not a defect in the tests.
+dev = ["pytest>=8", "ruff==0.16.4", "PyYAML>=6", "pip-audit>=2.7", "ruamel.yaml>=0.18"]

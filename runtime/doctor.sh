@@ -145,11 +145,38 @@ else
   else ok "no stale grant detected"; fi
 
   # 12. last update backup sane
-  LATEST_BAK=$(ls -t "$PLUGIN_DIR"/config.yaml.preupdate.* 2>/dev/null | head -1)
+  # The updater writes its backups as sibling FILES of the plugin directory:
+  #   <plugin-dir>.config.preupdate.<stamp>   (config copy)
+  #   <plugin-dir>.preupdate.<stamp>.tgz      (whole tree archive)
+  # See update.sh (BACKUP / TREE_BACKUP). Legacy updaters kept the config
+  # backup INSIDE the plugin dir (config.yaml.preupdate.<stamp>) — both
+  # locations are checked so an existing installation is not misreported.
+  PLUGIN_PARENT="$(dirname "$PLUGIN_DIR")"
+  PLUGIN_BASE="$(basename "$PLUGIN_DIR")"
+  LATEST_BAK=$(ls -t "$PLUGIN_PARENT/$PLUGIN_BASE".config.preupdate.* \
+                      "$PLUGIN_DIR"/config.yaml.preupdate.* 2>/dev/null | head -1)
   if [ -n "$LATEST_BAK" ]; then
     if [ -s "$LATEST_BAK" ]; then ok "last update backup present ($(basename "$LATEST_BAK"))"
     else warn "last update backup is EMPTY: $LATEST_BAK"; fi
   else ok "no update backups yet (clean install or never updated)"; fi
+
+  # 12b. no sibling copy of this plugin. Hermes registers EVERY plugin.yaml it
+  # finds under a scanned plugins root, so a copied plugin directory next to
+  # the real one is loaded as a SECOND instance of the same plugin (measured
+  # on Hermes v0.22.2: two manifests, both keyed hermes-token-router).
+  STRAY=""
+  for SIB in "$PLUGIN_PARENT"/*/; do
+    [ -d "$SIB" ] || continue
+    [ "$SIB" = "$PLUGIN_DIR/" ] && continue
+    if grep -qsE "^name:[[:space:]]*${PLUGIN_NAME}[[:space:]]*$" "$SIB/plugin.yaml" 2>/dev/null; then
+      STRAY="$STRAY $(basename "$SIB")"
+    fi
+  done
+  if [ -n "$STRAY" ]; then
+    bad "copy of $PLUGIN_NAME next to the plugin dir would load as a SECOND plugin instance:$STRAY — move it out of the plugins root"
+  else
+    ok "no second plugin instance in the plugins root"
+  fi
 fi
 
 # 13. supported hermes version

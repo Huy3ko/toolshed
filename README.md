@@ -62,13 +62,24 @@ authorization-bound tool selection that runs on **every** provider request — i
 **About profiles:** Hermes calls each agent configuration a *profile*. If you run one agent,
 that's `default`. With several agents, repeat these steps for every profile.
 
-> **Important: install Toolshed from the `/runtime` subdirectory.** Hermes' plugin scanner
-> evaluates the whole cloned tree. The `/runtime` path contains only the runtime payload and
-> scans **clean** (measured with Hermes v0.22.2: verdict `safe`, 0 findings) — it installs
-> without a prompt. The repository root additionally carries the development tree (ADRs, CI
-> workflows, contributor docs, the test suite), which the scanner cannot tell apart from payload:
-> it reports a `caution` verdict and asks for a confirmation. That prompt is avoidable, and the
-> findings are noise from the development files, not from the plugin.
+> **Important: install Toolshed from the `/runtime` subdirectory.** The repository root carries
+> **three plugin manifests with the same plugin name** — `plugin.yaml`, `runtime/plugin.yaml` and
+> `src/toolshed/plugin.yaml` — plus the development tree (ADRs, CI workflows, contributor docs, the
+> test suite). Hermes scans a plugin directory by its **top-level** `plugin.yaml`, so a root install
+> still registers exactly one plugin; the nested manifests are what the supply-chain scanner reports
+> on. Measured with Hermes v0.22.2: the `/runtime` payload scans **clean** (verdict `safe`, 0
+> findings) and installs without a prompt, while the repository root yields a `caution` verdict and
+> asks for a confirmation. That prompt is avoidable, and the findings are noise from the
+> development files, not from the plugin.
+>
+> **Never place a copy of the plugin tree inside the plugins directory.** Hermes registers *every*
+> `plugin.yaml` it finds under `~/.hermes/plugins/`. A backup that is a **directory** next to the
+> installed plugin is therefore loaded as a **second instance of the same plugin** — same plugin
+> key, separate state (measured on Hermes v0.22.2: two manifests, both keyed
+> `hermes-token-router`). Back up as a **file**, and preferably outside the plugins directory.
+> The bundled updater does exactly that: it writes `<plugin>.config.preupdate.<stamp>` and
+> `<plugin>.preupdate.<stamp>.tgz` — archive files, which the scanner does not register. The
+> bundled `doctor.sh` reports the last backup and warns if a second instance has appeared.
 >
 > **Termux / Android:** this report originally came from a Termux user. The rule is the same
 > there: install via `Huy3ko/toolshed/runtime`, never via the repo root. The installer and
@@ -133,7 +144,11 @@ hermes -p default plugins update hermes-token-router
 ```
 
 **Shipped behavior:** the runtime updater preserves `global.enabled`, `mode`,
-`floor_toolsets`, grants and the plugin tree when an update fails. Prefer the
+`floor_toolsets`, grants and the plugin tree when an update fails. It backs up as
+**files next to the plugin directory** (`<plugin>.config.preupdate.<stamp>`,
+`<plugin>.preupdate.<stamp>.tgz`) — never as a directory, because a directory
+inside the plugins root would be registered by Hermes as a second instance of
+the plugin (see the install note above). Prefer the
 payload updater for a controlled update:
 
 ```bash
