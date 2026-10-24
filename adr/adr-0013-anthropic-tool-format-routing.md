@@ -33,6 +33,7 @@
     "mutation_M1": "Anthropic-Fallback in `_tool_entry_name` entfernt -> genau die 3 Anthropic-Tests werden rot.",
     "mutation_M2": "Filter schreibt OpenAI-Struktur zurueck -> genau test_anthropic_format_survives_the_filter wird rot.",
     "suite": "117 passed, 6 skipped (vor dem Fix: 114 passed, 6 skipped).",
+    "e2e_echter_anthropic_request": "Zusaetzlich zur Unit-Ebene end-to-end geprueft (24.10.2026): ein echter Request, gebaut ueber `convert_tools_to_anthropic()` aus dem laufenden Hermes-Core, durch die vollstaendige `llm_request_middleware()` geschickt. Ergebnis: 3 -> 2 Tools (terminal, read_file behalten), das Anthropic-Format blieb erhalten (`input_schema` in allen Eintraegen, KEIN `function`-Key eingeschleust), Request-Keys unveraendert. Der Fix verengt also nicht nur Namen - er verengt den echten Request und verdreht dabei das Wire-Format nicht.",
     "lint": "ruff: All checks passed."
   },
   "deployment": "NICHT ausgerollt. Der Fix liegt im Repo-Branch `fix/anthropic-tool-format`. Die betroffene Instanz `christiane` nutzt eine eigene Unix-Identitaet mit eigenem Home (0700) - ein Zugriff darauf ist ein fremder Bereich und braucht eine eigene Freigabe. Nach dem Merge muss ihr Plugin-Baum auf den neuen Stand gebracht und ihr Gateway neu gestartet werden.",
