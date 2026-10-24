@@ -50,15 +50,56 @@ logger = logging.getLogger("hermes_plugins.hermes_token_router")
 PLUGIN_NAME = "hermes-token-router"
 
 
-def _request_tool_names(request: Dict[str, Any]) -> Set[str]:
-    """Die Werkzeugnamen, die der Request tatsaechlich mitbringt."""
-    names: Set[str] = set()
-    for entry in request.get("tools") or []:
-        if not isinstance(entry, dict):
-            continue
-        fn = entry.get("function") or {}
+def _tool_entry_name(entry: Any) -> Optional[str]:
+    """Der Werkzeugname eines einzelnen Request-Eintrags.
+
+    ZWEI Formate kommen in der Praxis vor:
+
+      OpenAI (api_mode `chat_completions`):
+          {"type": "function", "function": {"name": "terminal", ...}}
+
+      Anthropic (api_mode `anthropic_messages`):
+          {"name": "terminal", "description": ..., "input_schema": {...}}
+
+    Die Anthropic-Konvertierung passiert in `agent/transports/anthropic.py`
+    (`convert_tools_to_anthropic`) und laeuft VOR
+    `apply_llm_request_middleware()` in `agent/turn_api_request.py:143`.
+    Die Middleware sieht also je nach Provider ein anderes Format.
+
+    GEMESSENER BEFUND (24.10.2026, Instanz `christiane`): Der Router las
+    ausschliesslich das OpenAI-Format. Auf einer Anthropic-Instanz fand
+    er keine Namen und bailte mit `no_tools_in_request` - die Verengung
+    fand dort nie statt, ohne dass es im Log als Fehler auffiel (der
+    Router protokolliert fail-open auf INFO).
+
+    Deshalb wird BEIDES gelesen. Der Rueckgabewert bleibt der Name des
+    Eintrags - der Formatunterschied liegt nur in der Tiefe, nicht in
+    der Bedeutung.
+    """
+    if not isinstance(entry, dict):
+        return None
+    fn = entry.get("function")
+    if isinstance(fn, dict):
         name = fn.get("name")
         if isinstance(name, str) and name:
+            return name
+    # Anthropic-Format: der Name liegt direkt im Eintrag.
+    name = entry.get("name")
+    if isinstance(name, str) and name:
+        return name
+    return None
+
+
+def _request_tool_names(request: Dict[str, Any]) -> Set[str]:
+    """Die Werkzeugnamen, die der Request tatsaechlich mitbringt.
+
+    Format-tolerant: OpenAI- UND Anthropic-Eintraege werden gelesen.
+    Siehe `_tool_entry_name`.
+    """
+    names: Set[str] = set()
+    for entry in request.get("tools") or []:
+        name = _tool_entry_name(entry)
+        if name:
             names.add(name)
     return names
 
@@ -463,9 +504,14 @@ def llm_request_middleware(**kwargs: Any) -> Optional[Dict[str, Any]]:
         return _bail("no_tool_names")
 
     # Nur die Werkzeuge behalten, die der Host ohnehin mitbringt.
+    #
+    # WICHTIG: Die Eintraege werden UNVERAENDERT zurueckgegeben. Der
+    # Request traegt das Format seines Providers (OpenAI- oder
+    # Anthropic-Format) - der Router schreibt kein anderes Format
+    # hinein. Die Auswahl laeuft ueber den Namen, den
+    # `_tool_entry_name` in beiden Formaten findet.
     kept = [t for t in request.get("tools") or []
-            if isinstance(t, dict)
-            and (t.get("function") or {}).get("name") in allowed_names]
+            if _tool_entry_name(t) in allowed_names]
     if not kept:
         return _bail("nothing_kept")
 
